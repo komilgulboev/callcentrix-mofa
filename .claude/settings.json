@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git rm *)",
+      "Bash(cd \"c:/Projects/CallCenter/callcenter.tj/callcenter.tj-ui\" && rm -rf .git && echo \"removed nested .git\" && ls -la | head -5)",
+      "Bash(git commit -m ' *)",
+      "Bash(git commit *)",
+      "Skill(run)",
+      "Skill(run:*)"
+    ],
+    "additionalDirectories": [
+      "c:\\Projects\\CallCenter\\callcenter.tj\\callcenter.tj-ui\\.git"
+    ]
+  }
+}

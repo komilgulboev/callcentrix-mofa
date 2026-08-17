@@ -1,0 +1,34 @@
+import {
+  cilSpeedometer,
+  cilPeople,
+  cilBuilding,
+  cilPhone,
+  cilDescription,
+  cilList,
+  cilSettings,
+  cilUserFollow,
+  cilTag,
+  cilDialpad,
+  cilShieldAlt,
+  cilLockLocked,
+} from '@coreui/icons'
+
+const navigation = [
+  { component: 'CNavItem',  name: 'nav.dashboard',     to: '/dashboard',    icon: cilSpeedometer },
+  { component: 'CNavTitle', name: 'nav.management',     roles: [0, 1] },
+  { component: 'CNavItem',  name: 'nav.tenants',        to: '/tenants',      icon: cilBuilding,    roles: [0] },
+  { component: 'CNavItem',  name: 'nav.tenant_users',   to: '/tenant-users', icon: cilUserFollow,  roles: [0] },
+  { component: 'CNavItem',  name: 'nav.users',          to: '/users',        icon: cilPeople,      roles: [0, 1] },
+  { component: 'CNavItem',  name: 'nav.unauthorized_users', to: '/users/unauthorized', icon: cilLockLocked, roles: [0] },
+  { component: 'CNavItem',  name: 'nav.topics',         to: '/topics',       icon: cilTag,         roles: [0, 1] },
+  { component: 'CNavItem',  name: 'nav.ivr',            to: '/ivr',          icon: cilDialpad,     roles: [0, 1, 2] },
+  { component: 'CNavItem',  name: 'nav.whitelist',      to: '/whitelist',    icon: cilShieldAlt,   roles: [0, 1] },
+  { component: 'CNavTitle', name: 'nav.call_center' },
+  { component: 'CNavItem',  name: 'nav.webphone',       to: '/webphone',     icon: cilPhone },
+  { component: 'CNavItem',  name: 'nav.cdr',            to: '/cdr',          icon: cilList,        roles: [0, 1, 2] },
+  { component: 'CNavItem',  name: 'nav.tickets',        to: '/tickets',      icon: cilDescription },
+  { component: 'CNavTitle', name: 'nav.settings_group', roles: [0, 1] },
+  { component: 'CNavItem',  name: 'nav.settings',       to: '/settings',     icon: cilSettings,    roles: [0, 1] },
+]
+
+export default navigation
