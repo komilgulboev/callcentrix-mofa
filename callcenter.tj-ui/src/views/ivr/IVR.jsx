@@ -70,7 +70,7 @@ export default function IVR() {
       )}
 
       {!tid ? (
-        <CAlert color="info">{t('whitelist.select_tenant_hint')}</CAlert>
+        <CAlert color="info">{t('common.select_tenant_hint')}</CAlert>
       ) : loading ? (
         <div className="text-center py-5"><CSpinner /></div>
       ) : (

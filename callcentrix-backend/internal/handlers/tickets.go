@@ -3,8 +3,10 @@ package handlers
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 	mw "callcentrix/internal/middleware"
@@ -13,19 +15,21 @@ import (
 type TicketsHandler struct{ DB *sql.DB }
 
 type Ticket struct {
-	ID        int        `json:"id"`
-	TenantID  *int       `json:"tenantId"`
-	TopicID   *int       `json:"topicId"`
-	Topic     *TopicInfo `json:"topic,omitempty"`
-	Subject   string     `json:"subject"`
-	Body      string     `json:"body"`
-	CallerNo  string     `json:"callerNo"`
-	CalleeNo  string     `json:"calleeNo"`
-	UserID    *int       `json:"userId"`
-	Status    string     `json:"status"`
-	Priority  string     `json:"priority"`
-	CreatedAt string     `json:"createdAt"`
-	UpdatedAt string     `json:"updatedAt"`
+	ID               int        `json:"id"`
+	TenantID         *int       `json:"tenantId"`
+	TopicID          *int       `json:"topicId"`
+	Topic            *TopicInfo `json:"topic,omitempty"`
+	Subject          string     `json:"subject"`
+	Body             string     `json:"body"`
+	CallerNo         string     `json:"callerNo"`
+	CalleeNo         string     `json:"calleeNo"`
+	UserID           *int       `json:"userId"`
+	AssignedUserID   *int       `json:"assignedUserId"`
+	AssignedUserName string     `json:"assignedUserName,omitempty"`
+	Status           string     `json:"status"`
+	Priority         string     `json:"priority"`
+	CreatedAt        string     `json:"createdAt"`
+	UpdatedAt        string     `json:"updatedAt"`
 }
 
 type TicketComment struct {
@@ -122,14 +126,18 @@ func (h *TicketsHandler) Get(w http.ResponseWriter, r *http.Request) {
 	id, _ := strconv.Atoi(chi.URLParam(r, "id"))
 	var t Ticket
 	var namesJSON []byte
+	var assignedName sql.NullString
 	err := h.DB.QueryRowContext(r.Context(),
 		`SELECT t.id, t.tenant_id, t.topic_id, t.subject, t.body, t.caller_no, t.callee_no,
-		        t.user_id, t.status, t.priority, t.created_at, t.updated_at, tc.names
+		        t.user_id, t.assigned_user_id, t.status, t.priority, t.created_at, t.updated_at, tc.names,
+		        COALESCE(NULLIF(TRIM(CONCAT(au.first_name,' ',au.last_name)), ''), au.username)
 		 FROM tickets t
 		 LEFT JOIN topic_catalog tc ON tc.id = t.topic_id
+		 LEFT JOIN users au ON au.id = t.assigned_user_id
 		 WHERE t.id = $1`, id,
 	).Scan(&t.ID, &t.TenantID, &t.TopicID, &t.Subject, &t.Body, &t.CallerNo, &t.CalleeNo,
-		&t.UserID, &t.Status, &t.Priority, &t.CreatedAt, &t.UpdatedAt, &namesJSON)
+		&t.UserID, &t.AssignedUserID, &t.Status, &t.Priority, &t.CreatedAt, &t.UpdatedAt, &namesJSON,
+		&assignedName)
 	if err == sql.ErrNoRows {
 		writeError(w, http.StatusNotFound, "not found")
 		return
@@ -144,7 +152,87 @@ func (h *TicketsHandler) Get(w http.ResponseWriter, r *http.Request) {
 			t.Topic = &TopicInfo{ID: *t.TopicID, Names: names}
 		}
 	}
+	t.AssignedUserName = assignedName.String
 	writeJSON(w, http.StatusOK, t)
+}
+
+// AssignableUsers returns the Supervisors/TenantAdmins of the caller's own
+// tenant — the pool an operator can assign a ticket to. Ticket assignment is
+// a per-tenant concept, so SuperAdmin (attached to no tenant) gets an empty
+// list here rather than every tenant's admins mixed together.
+func (h *TicketsHandler) AssignableUsers(w http.ResponseWriter, r *http.Request) {
+	c := mw.GetClaims(r)
+	type assignableUser struct {
+		ID        int    `json:"id"`
+		Username  string `json:"username"`
+		FirstName string `json:"firstName"`
+		LastName  string `json:"lastName"`
+	}
+	result := []assignableUser{}
+	if c.TenantID == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"users": result})
+		return
+	}
+
+	rows, err := h.DB.QueryContext(r.Context(),
+		`SELECT id, username, first_name, last_name FROM users
+		 WHERE tenant_id = $1 AND user_type <= 2 AND active = TRUE
+		 ORDER BY first_name, last_name`, *c.TenantID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var u assignableUser
+		if err := rows.Scan(&u.ID, &u.Username, &u.FirstName, &u.LastName); err != nil {
+			continue
+		}
+		result = append(result, u)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"users": result})
+}
+
+// Assign sets (or, with a null userId, clears) the specialist a ticket is
+// assigned to. The assignee must be a Supervisor/TenantAdmin of the same
+// tenant as the caller — see AssignableUsers.
+func (h *TicketsHandler) Assign(w http.ResponseWriter, r *http.Request) {
+	id, _ := strconv.Atoi(chi.URLParam(r, "id"))
+	c := mw.GetClaims(r)
+
+	var body struct {
+		UserID *int `json:"userId"`
+	}
+	if err := decode(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid body")
+		return
+	}
+
+	if body.UserID != nil {
+		var cnt int
+		if c.TenantID != nil {
+			h.DB.QueryRowContext(r.Context(),
+				`SELECT COUNT(*) FROM users WHERE id=$1 AND tenant_id=$2 AND user_type <= 2`,
+				*body.UserID, *c.TenantID).Scan(&cnt)
+		} else {
+			h.DB.QueryRowContext(r.Context(),
+				`SELECT COUNT(*) FROM users WHERE id=$1 AND user_type <= 2`,
+				*body.UserID).Scan(&cnt)
+		}
+		if cnt == 0 {
+			writeError(w, http.StatusBadRequest, "invalid assignee")
+			return
+		}
+	}
+
+	_, err := h.DB.ExecContext(r.Context(),
+		`UPDATE tickets SET assigned_user_id=$1, updated_at=NOW() WHERE id=$2`,
+		body.UserID, id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (h *TicketsHandler) Create(w http.ResponseWriter, r *http.Request) {
@@ -183,24 +271,61 @@ func (h *TicketsHandler) Create(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, map[string]int{"id": id})
 }
 
+// Update applies a partial update — only fields actually present in the
+// request body are written. Callers like TicketDetail's status dropdown send
+// just {"status": "resolved"}; a blanket "SET subject=..., topic_id=..."
+// would null out every other field (subject/body/caller_no/priority/topic_id)
+// on every such call, since Go decodes the missing JSON keys as zero values.
 func (h *TicketsHandler) Update(w http.ResponseWriter, r *http.Request) {
 	id, _ := strconv.Atoi(chi.URLParam(r, "id"))
 	var body struct {
-		Subject  string `json:"subject"`
-		Body     string `json:"body"`
-		CallerNo string `json:"callerNo"`
-		Status   string `json:"status"`
-		Priority string `json:"priority"`
-		TopicID  *int   `json:"topicId"`
-		UserID   *int   `json:"userId"`
+		Subject  *string `json:"subject"`
+		Body     *string `json:"body"`
+		CallerNo *string `json:"callerNo"`
+		Status   *string `json:"status"`
+		Priority *string `json:"priority"`
+		TopicID  *int    `json:"topicId"`
 	}
 	if err := decode(r, &body); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid body")
 		return
 	}
-	_, err := h.DB.ExecContext(r.Context(),
-		`UPDATE tickets SET subject=$1, body=$2, caller_no=$3, status=$4, priority=$5, topic_id=$6, updated_at=NOW() WHERE id=$7`,
-		body.Subject, body.Body, body.CallerNo, body.Status, body.Priority, body.TopicID, id)
+
+	sets := []string{}
+	args := []any{}
+	n := 1
+	add := func(col string, val any) {
+		sets = append(sets, fmt.Sprintf("%s=$%d", col, n))
+		args = append(args, val)
+		n++
+	}
+	if body.Subject != nil {
+		add("subject", *body.Subject)
+	}
+	if body.Body != nil {
+		add("body", *body.Body)
+	}
+	if body.CallerNo != nil {
+		add("caller_no", *body.CallerNo)
+	}
+	if body.Status != nil {
+		add("status", *body.Status)
+	}
+	if body.Priority != nil {
+		add("priority", *body.Priority)
+	}
+	if body.TopicID != nil {
+		add("topic_id", *body.TopicID)
+	}
+	if len(sets) == 0 {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	sets = append(sets, "updated_at=NOW()")
+	args = append(args, id)
+	query := "UPDATE tickets SET " + strings.Join(sets, ", ") + fmt.Sprintf(" WHERE id=$%d", n)
+
+	_, err := h.DB.ExecContext(r.Context(), query, args...)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return

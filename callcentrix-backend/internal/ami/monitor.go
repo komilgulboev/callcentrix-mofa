@@ -2,6 +2,7 @@ package ami
 
 import (
 	"log"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -43,11 +44,22 @@ type QueueStats struct {
 	Members   int    `json:"members"`
 }
 
+// WaitingCaller is one caller currently on hold in a queue, not yet connected
+// to an agent.
+type WaitingCaller struct {
+	Channel     string `json:"channel"`
+	Queue       string `json:"queue"`
+	CallerID    string `json:"callerId"`
+	WaitSeconds int    `json:"waitSeconds"`
+	JoinedAt    int64  `json:"-"`
+}
+
 type Snapshot struct {
-	Type   string                `json:"type"`
-	Agents map[string]AgentState `json:"agents"`
-	Calls  map[string]LiveCall   `json:"calls"`
-	Queues map[string]QueueStats `json:"queues"`
+	Type           string                `json:"type"`
+	Agents         map[string]AgentState `json:"agents"`
+	Calls          map[string]LiveCall   `json:"calls"`
+	Queues         map[string]QueueStats `json:"queues"`
+	WaitingCallers []WaitingCaller       `json:"waitingCallers"`
 }
 
 // pendingReconnect records a caller still held in the dialplan (see
@@ -68,10 +80,11 @@ const pendingReconnectTTL = 5 * time.Second
 const deliberateIntentTTL = 3 * time.Second
 
 type Monitor struct {
-	mu     sync.RWMutex
-	agents map[string]AgentState
-	calls  map[string]LiveCall
-	queues map[string]QueueStats
+	mu             sync.RWMutex
+	agents         map[string]AgentState
+	calls          map[string]LiveCall
+	queues         map[string]QueueStats
+	waitingCallers map[string]WaitingCaller // Uniqueid -> caller currently waiting in a queue
 
 	clients       []*Client          // every attached AMI client (one per Asterisk server), for RefreshFromAMI
 	agentClient   map[string]*Client // agent ext -> AMI client for the box it was last active on
@@ -88,6 +101,7 @@ func NewMonitor() *Monitor {
 		agents:           make(map[string]AgentState),
 		calls:            make(map[string]LiveCall),
 		queues:           make(map[string]QueueStats),
+		waitingCallers:   make(map[string]WaitingCaller),
 		agentClient:      make(map[string]*Client),
 		channelClient:    make(map[string]*Client),
 		bridgeChannels:   make(map[string]map[string]bool),
@@ -224,11 +238,20 @@ func (m *Monitor) Snapshot() Snapshot {
 		queues[k] = v
 	}
 
+	waitingCallers := make([]WaitingCaller, 0, len(m.waitingCallers))
+	for _, wc := range m.waitingCallers {
+		if wc.JoinedAt > 0 {
+			wc.WaitSeconds = int(now.Unix() - wc.JoinedAt)
+		}
+		waitingCallers = append(waitingCallers, wc)
+	}
+
 	return Snapshot{
-		Type:   "snapshot",
-		Agents: agents,
-		Calls:  calls,
-		Queues: queues,
+		Type:           "snapshot",
+		Agents:         agents,
+		Calls:          calls,
+		Queues:         queues,
+		WaitingCallers: waitingCallers,
 	}
 }
 
@@ -269,7 +292,14 @@ func (m *Monitor) SnapshotForTenant(exts map[string]bool, queueNames map[string]
 		}
 	}
 
-	return Snapshot{Type: "snapshot", Agents: agents, Calls: calls, Queues: queues}
+	waitingCallers := make([]WaitingCaller, 0)
+	for _, wc := range full.WaitingCallers {
+		if queueNames[wc.Queue] {
+			waitingCallers = append(waitingCallers, wc)
+		}
+	}
+
+	return Snapshot{Type: "snapshot", Agents: agents, Calls: calls, Queues: queues, WaitingCallers: waitingCallers}
 }
 
 // markFirstOnline records the first time today this agent was seen in any
@@ -390,6 +420,12 @@ func (m *Monitor) handleEvent(client *Client, e Event) {
 		// Remove from calls
 		delete(m.calls, channel)
 		delete(m.channelClient, channel)
+		// A caller can hang up while still on hold in a queue — normally
+		// caught by QueueCallerAbandon, but Uniqueid is a reliable enough key
+		// to also clean this up here in case that event is missed.
+		if uid := e["Uniqueid"]; uid != "" {
+			delete(m.waitingCallers, uid)
+		}
 		// Mark agent available
 		ext := extractExtension(channel)
 		if ext != "" {
@@ -496,6 +532,15 @@ func (m *Monitor) handleEvent(client *Client, e Event) {
 		q.Waiting++
 		m.queues[queue] = q
 
+		if uid := e["Uniqueid"]; uid != "" {
+			m.waitingCallers[uid] = WaitingCaller{
+				Channel:  e["Channel"],
+				Queue:    queue,
+				CallerID: e["CallerIDNum"],
+				JoinedAt: time.Now().Unix(),
+			}
+		}
+
 	case "QueueCallerLeave", "QueueCallerAbandon":
 		queue := e["Queue"]
 		if q, ok := m.queues[queue]; ok {
@@ -506,6 +551,35 @@ func (m *Monitor) handleEvent(client *Client, e Event) {
 				q.Completed++
 			}
 			m.queues[queue] = q
+		}
+		if uid := e["Uniqueid"]; uid != "" {
+			delete(m.waitingCallers, uid)
+		}
+
+	// QueueEntry is emitted once per currently-waiting caller in response to
+	// QueueStatus (see RefreshFromAMI) — used to (re)seed waitingCallers on
+	// startup/periodic refresh so a caller already waiting when this process
+	// started, or a missed QueueCallerJoin, doesn't leave a gap. Wait is the
+	// caller's already-elapsed hold time in seconds, per Asterisk; JoinedAt is
+	// backdated by that much so the live counter keeps counting from the
+	// right base instead of resetting to 0.
+	case "QueueEntry":
+		queue := e["Queue"]
+		uid := e["Uniqueid"]
+		if uid == "" {
+			return
+		}
+		waited := 0
+		if w := e["Wait"]; w != "" {
+			if n, err := strconv.Atoi(w); err == nil {
+				waited = n
+			}
+		}
+		m.waitingCallers[uid] = WaitingCaller{
+			Channel:  e["Channel"],
+			Queue:    queue,
+			CallerID: e["CallerIDNum"],
+			JoinedAt: time.Now().Unix() - int64(waited),
 		}
 
 	case "QueueMemberStatus":

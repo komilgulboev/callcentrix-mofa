@@ -11,6 +11,8 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	chimw "github.com/go-chi/chi/v5/middleware"
+	"github.com/minio/minio-go/v7"
+	"github.com/minio/minio-go/v7/pkg/credentials"
 
 	"callcentrix/internal/ami"
 	"callcentrix/internal/asterisk"
@@ -35,9 +37,9 @@ func main() {
 	if err != nil { log.Fatalf("DB connect: %v", err) }
 	if err := db.Migrate(database); err != nil { log.Fatalf("DB migrate: %v", err) }
 
-	// KC-number dialplan generation needs to know how to call back into this
-	// backend's own /internal/whitelist/check endpoint via CURL().
-	asterisk.Configure(cfg.PublicBase, cfg.AsteriskKey)
+	if err := asterisk.EnsureBlacklistCheckSubroutine(database); err != nil {
+		log.Printf("[Asterisk] blacklist-check subroutine warning: %v", err)
+	}
 	if err := asterisk.EnsureWhitelistCheckSubroutine(database); err != nil {
 		log.Printf("[Asterisk] whitelist-check subroutine warning: %v", err)
 	}
@@ -95,6 +97,7 @@ func main() {
 	kcNumbersH := &handlers.KCNumbersHandler{DB: database, AMI: amiRegistry}
 	providersH := &handlers.ProvidersHandler{DB: database, AMI: amiRegistry}
 	asteriskServersH := &handlers.AsteriskServersHandler{DB: database, AMI: amiRegistry, Monitor: monitor}
+	blacklistH := &handlers.BlacklistHandler{DB: database}
 	whitelistH := &handlers.WhitelistHandler{DB: database}
 	cdrDB := database
 	if cfg.CDRDSN != "" {
@@ -104,7 +107,25 @@ func main() {
 			log.Printf("CDR DB connect warning: %v", err)
 		}
 	}
-	cdrH     := &handlers.CDRHandler{DB: cdrDB, RecordingURL: cfg.RecordingURL}
+
+	// Recordings live in a private MinIO bucket — only this backend talks to
+	// it (see CDRHandler.Audio), so the browser never learns MinIO's address
+	// or credentials. Left nil (Audio then 503s) if not configured.
+	var minioClient *minio.Client
+	if cfg.MinioEndpoint != "" {
+		mc, err := minio.New(cfg.MinioEndpoint, &minio.Options{
+			Creds:  credentials.NewStaticV4(cfg.MinioAccessKey, cfg.MinioSecretKey, ""),
+			Secure: cfg.MinioUseSSL,
+		})
+		if err != nil {
+			log.Printf("MinIO client init warning: %v", err)
+		} else {
+			minioClient = mc
+		}
+	}
+
+	cdrH     := &handlers.CDRHandler{DB: cdrDB, Minio: minioClient, Bucket: cfg.MinioBucket}
+	reportsH := &handlers.ReportsHandler{DB: database, CDRDB: cdrDB}
 	settingsH := &handlers.SettingsHandler{DB: database, UploadsDir: cfg.UploadsDir}
 	regH := &handlers.RegistrationHandler{DB: database, JWTSecret: cfg.JWTSecret, JWTMinutes: cfg.JWTMinutes, SIPTransport: cfg.SIPTransport}
 	monitorH := &handlers.MonitorHandler{DB: database, Monitor: monitor, Hub: hub, AMI: amiRegistry}
@@ -115,7 +136,12 @@ func main() {
 	r.Use(chimw.Recoverer)
 	r.Use(mw.CORS)
 
-	// Public endpoint for Asterisk dialplan (no JWT, protected by ASTERISK_KEY)
+	// Manual/debug lookup only — the dialplan itself now checks the blacklist
+	// directly over ODBC (BLACKLISTCHECK(), see EnsureBlacklistCheckSubroutine)
+	// instead of calling this endpoint, so call routing doesn't depend on this
+	// backend being reachable. Kept for ops to check a number without DB access.
+	// No JWT, protected by ASTERISK_KEY.
+	r.Get("/internal/blacklist/check", blacklistH.CheckPlain(cfg.AsteriskKey))
 	r.Get("/internal/whitelist/check", whitelistH.CheckPlain(cfg.AsteriskKey))
 
 	// Public build-info endpoint, so a deployed instance's version can be confirmed at a glance
@@ -201,9 +227,11 @@ func main() {
 		// Tickets — all roles
 		r.Get("/api/tickets",                  ticketsH.List)
 		r.Post("/api/tickets",                 ticketsH.Create)
+		r.Get("/api/tickets/assignable-users", ticketsH.AssignableUsers)
 		r.Get("/api/tickets/{id}",             ticketsH.Get)
 		r.Put("/api/tickets/{id}",             ticketsH.Update)
 		r.Delete("/api/tickets/{id}",          ticketsH.Delete)
+		r.Patch("/api/tickets/{id}/assign",    ticketsH.Assign)
 		r.Get("/api/tickets/{id}/comments",    ticketsH.ListComments)
 		r.Post("/api/tickets/{id}/comments",   ticketsH.AddComment)
 
@@ -224,6 +252,23 @@ func main() {
 			r.Post("/api/actions/pause",     monitorH.Pause)
 			r.Post("/api/actions/unpause",   monitorH.Unpause)
 			r.Post("/api/actions/hangup",    monitorH.Hangup)
+		})
+
+		// Reports — SuperAdmin + TenantAdmin + Supervisor
+		r.Group(func(r chi.Router) {
+			r.Use(mw.RequireRole(2))
+			r.Get("/api/reports/tickets", reportsH.Tickets)
+		})
+
+		// Blacklist — SuperAdmin + TenantAdmin
+		r.Group(func(r chi.Router) {
+			r.Use(mw.RequireRole(1))
+			r.Get("/api/blacklist",              blacklistH.List)
+			r.Post("/api/blacklist",             blacklistH.Create)
+			r.Put("/api/blacklist/{id}",         blacklistH.Update)
+			r.Delete("/api/blacklist/{id}",      blacklistH.Delete)
+			r.Patch("/api/blacklist/{id}/toggle", blacklistH.Toggle)
+			r.Get("/api/blacklist/check",        blacklistH.Check)
 		})
 
 		// Whitelist — SuperAdmin + TenantAdmin

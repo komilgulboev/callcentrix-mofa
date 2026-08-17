@@ -38,6 +38,7 @@ type IVRConfig struct {
 	WorkHoursStart     string `json:"workHoursStart"`
 	WorkHoursEnd       string `json:"workHoursEnd"`
 	WorkDays           string `json:"workDays"`
+	WhitelistEnabled   bool   `json:"whitelistEnabled"`
 	UpdatedAt          string `json:"updatedAt"`
 }
 
@@ -96,11 +97,13 @@ func (h *IVRHandler) GetConfig(w http.ResponseWriter, r *http.Request) {
 	err = h.DB.QueryRowContext(r.Context(),
 		`SELECT id, tenant_id, kc_number_id, greeting_file, closed_greeting_file, moh_class,
 		        wait_timeout, queue_timeout, strategy, max_callers,
-		        work_hours_enabled, work_hours_start, work_hours_end, work_days, updated_at
+		        work_hours_enabled, work_hours_start, work_hours_end, work_days,
+		        whitelist_enabled, updated_at
 		 FROM ivr_configs WHERE kc_number_id=$1`, kcID,
 	).Scan(&cfg.ID, &cfg.TenantID, &cfg.KCNumberID, &cfg.GreetingFile, &cfg.ClosedGreetingFile, &cfg.MOHClass,
 		&cfg.WaitTimeout, &cfg.QueueTimeout, &cfg.Strategy, &cfg.MaxCallers,
-		&cfg.WorkHoursEnabled, &cfg.WorkHoursStart, &cfg.WorkHoursEnd, &cfg.WorkDays, &cfg.UpdatedAt)
+		&cfg.WorkHoursEnabled, &cfg.WorkHoursStart, &cfg.WorkHoursEnd, &cfg.WorkDays,
+		&cfg.WhitelistEnabled, &cfg.UpdatedAt)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -116,7 +119,9 @@ func (h *IVRHandler) GetConfig(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// UpdateConfig saves queue strategy, timeouts, MOH class for a KC number.
+// UpdateConfig saves queue strategy, timeouts, MOH class and the whitelist
+// gate toggle for a KC number. Takes effect on the live dialplan only after
+// Sync is called (same as greeting/menu/schedule changes).
 func (h *IVRHandler) UpdateConfig(w http.ResponseWriter, r *http.Request) {
 	kcID, _, err := h.kcNumberID(r)
 	if err != nil {
@@ -125,11 +130,12 @@ func (h *IVRHandler) UpdateConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var body struct {
-		Strategy     string `json:"strategy"`
-		WaitTimeout  int    `json:"waitTimeout"`
-		QueueTimeout int    `json:"queueTimeout"`
-		MaxCallers   int    `json:"maxCallers"`
-		MOHClass     string `json:"mohClass"`
+		Strategy         string `json:"strategy"`
+		WaitTimeout      int    `json:"waitTimeout"`
+		QueueTimeout     int    `json:"queueTimeout"`
+		MaxCallers       int    `json:"maxCallers"`
+		MOHClass         string `json:"mohClass"`
+		WhitelistEnabled bool   `json:"whitelistEnabled"`
 	}
 	if err := decode(r, &body); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid body")
@@ -147,10 +153,10 @@ func (h *IVRHandler) UpdateConfig(w http.ResponseWriter, r *http.Request) {
 
 	_, err = h.DB.ExecContext(r.Context(),
 		`UPDATE ivr_configs SET strategy=$1, wait_timeout=$2, queue_timeout=$3,
-		  max_callers=$4, moh_class=$5, updated_at=NOW()
-		 WHERE kc_number_id=$6`,
+		  max_callers=$4, moh_class=$5, whitelist_enabled=$6, updated_at=NOW()
+		 WHERE kc_number_id=$7`,
 		body.Strategy, body.WaitTimeout, body.QueueTimeout,
-		body.MaxCallers, body.MOHClass, kcID)
+		body.MaxCallers, body.MOHClass, body.WhitelistEnabled, kcID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -391,10 +397,12 @@ func (h *IVRHandler) Sync(w http.ResponseWriter, r *http.Request) {
 	var cfg IVRConfig
 	err = h.DB.QueryRowContext(r.Context(),
 		`SELECT greeting_file, wait_timeout, queue_timeout, strategy, max_callers,
-		        closed_greeting_file, work_hours_enabled, work_hours_start, work_hours_end, work_days
+		        closed_greeting_file, work_hours_enabled, work_hours_start, work_hours_end, work_days,
+		        whitelist_enabled
 		 FROM ivr_configs WHERE kc_number_id=$1`, kcID,
 	).Scan(&cfg.GreetingFile, &cfg.WaitTimeout, &cfg.QueueTimeout, &cfg.Strategy, &cfg.MaxCallers,
-		&cfg.ClosedGreetingFile, &cfg.WorkHoursEnabled, &cfg.WorkHoursStart, &cfg.WorkHoursEnd, &cfg.WorkDays)
+		&cfg.ClosedGreetingFile, &cfg.WorkHoursEnabled, &cfg.WorkHoursStart, &cfg.WorkHoursEnd, &cfg.WorkDays,
+		&cfg.WhitelistEnabled)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -449,7 +457,7 @@ func (h *IVRHandler) Sync(w http.ResponseWriter, r *http.Request) {
 		Days:           cfg.WorkDays,
 		ClosedGreeting: cfg.ClosedGreetingFile,
 	}
-	if err := asterisk.SyncKCNumberDialplan(h.DB, kcID, cfg.GreetingFile, cfg.WaitTimeout, cfg.QueueTimeout, dpOptions, wh); err != nil {
+	if err := asterisk.SyncKCNumberDialplan(h.DB, kcID, cfg.GreetingFile, cfg.WaitTimeout, cfg.QueueTimeout, dpOptions, wh, cfg.WhitelistEnabled); err != nil {
 		writeError(w, http.StatusInternalServerError, "dialplan: "+err.Error())
 		return
 	}

@@ -368,7 +368,7 @@ function KCNumbersTab({ tenantsList }) {
       </div>
 
       {!tenantId ? (
-        <CAlert color="info">{t('whitelist.select_tenant_hint')}</CAlert>
+        <CAlert color="info">{t('common.select_tenant_hint')}</CAlert>
       ) : !providersList.length ? (
         <CAlert color="warning">
           {t('kc_numbers.need_provider_hint')}

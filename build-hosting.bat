@@ -17,7 +17,7 @@ set OUT_DIR=%ROOT%cc_hosting_version
 if /i "%~1"=="linux" (
     set BINARY_NAME=callcentrix-linux
 ) else (
-    set BINARY_NAME=callcentrix.exe
+    set BINARY_NAME=callcentrix_mofa.exe
 )
 
 for /f %%i in ('git rev-parse --short HEAD 2^>nul') do set GIT_COMMIT=%%i

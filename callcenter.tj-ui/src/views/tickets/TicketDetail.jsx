@@ -26,20 +26,39 @@ export default function TicketDetail() {
   const [comment,  setComment]  = useState('')
   const [sending,  setSending]  = useState(false)
   const [status,   setStatus]   = useState('')
+  const [assignedUserId, setAssignedUserId] = useState('')
+  const [assignableUsers, setAssignableUsers] = useState([])
+  const [assigning, setAssigning] = useState(false)
 
   const load = () => {
     Promise.all([ticketsApi.get(id), ticketsApi.comments(id)])
-      .then(([tk, c]) => { setTicket(tk); setStatus(tk.status); setComments(c.comments ?? c) })
+      .then(([tk, c]) => {
+        setTicket(tk)
+        setStatus(tk.status)
+        setAssignedUserId(tk.assignedUserId ? String(tk.assignedUserId) : '')
+        setComments(c.comments ?? c)
+      })
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false))
   }
 
   useEffect(load, [id])
+  useEffect(() => {
+    ticketsApi.assignableUsers().then((d) => setAssignableUsers(d.users ?? [])).catch(() => {})
+  }, [])
 
   const handleStatusChange = async (s) => {
     setStatus(s)
     try { await ticketsApi.update(id, { status: s }) }
     catch (e) { setError(e.message) }
+  }
+
+  const handleAssign = async (userIdStr) => {
+    setAssignedUserId(userIdStr)
+    setAssigning(true)
+    try { await ticketsApi.assign(id, userIdStr ? Number(userIdStr) : null) }
+    catch (e) { setError(e.message) }
+    finally { setAssigning(false) }
   }
 
   const handleComment = async () => {
@@ -124,6 +143,17 @@ export default function TicketDetail() {
                 <label className="small text-muted d-block">{t('ticket_detail.status')}</label>
                 <CFormSelect value={status} onChange={(e) => handleStatusChange(e.target.value)}>
                   {STATUSES.map((s) => <option key={s} value={s}>{statusLabel(s)}</option>)}
+                </CFormSelect>
+              </div>
+              <div className="mb-3">
+                <label className="small text-muted d-block">{t('ticket_detail.assigned_to')}</label>
+                <CFormSelect value={assignedUserId} disabled={assigning} onChange={(e) => handleAssign(e.target.value)}>
+                  <option value="">{t('ticket_detail.unassigned')}</option>
+                  {assignableUsers.map((u) => (
+                    <option key={u.id} value={u.id}>
+                      {[u.firstName, u.lastName].filter(Boolean).join(' ') || u.username}
+                    </option>
+                  ))}
                 </CFormSelect>
               </div>
               <div className="mb-2">

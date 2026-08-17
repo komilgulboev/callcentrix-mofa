@@ -15,23 +15,79 @@ func KCQueueName(kcNumberID int) string {
 	return fmt.Sprintf("queue_tenant_%d", kcNumberID)
 }
 
-// publicBase/asteriskKey are set once at startup via Configure() so dialplan
-// generation can build a CURL() URL back into this same backend (used by the
-// shared whitelist-check subroutine). See cmd/server/main.go.
-var publicBase, asteriskKey string
+// recordingDir is Asterisk's standard monitor spool directory — where
+// MixMonitor writes recordings and where the server-side "mc mirror --watch"
+// job (see ASTERISK_CLUSTER_SETUP.md-adjacent ops docs) picks them up to
+// push into MinIO. Hardcoded rather than configurable: it's a convention of
+// the Asterisk box's own filesystem layout, not something this backend
+// controls or varies by deployment.
+const recordingDir = "/var/spool/asterisk/monitor"
 
-// Configure records the values dialplan generation needs to call back into
-// this backend (HTTP_PUBLIC_BASE / ASTERISK_KEY). Call once at startup.
-func Configure(publicBaseURL, asteriskKeyVal string) {
-	publicBase = publicBaseURL
-	asteriskKey = asteriskKeyVal
+// addRecording appends the two dialplan rows that make a call's recording
+// findable later: MixMonitor (writes ${UNIQUEID}.wav under recordingDir,
+// 'b' = only once the channel actually bridges to an agent, so unanswered
+// calls don't produce an empty file) and Set(CDR(userfield)=...), which is
+// what CDRHandler.Audio/ReportsHandler use as the MinIO object key. Without
+// this second line userfield stays empty even though the recording exists —
+// exactly the bug that prompted adding this at all.
+func addRecording(b *dialplanBuilder) {
+	b.add("MixMonitor", fmt.Sprintf("%s/${UNIQUEID}.wav,b", recordingDir))
+	b.add("Set", "CDR(userfield)=${UNIQUEID}.wav")
+}
+
+// EnsureBlacklistCheckSubroutine writes the shared [blacklist-check] Gosub
+// context: Gosub(blacklist-check,s,1(${CALLERID(num)},<tenantId>)) from any
+// KC number's dialplan returns "1" (blocked)/"0" (allowed) in GOSUB_RETVAL via
+// the ODBC_BLACKLISTCHECK() func_odbc function — a direct SQL lookup against
+// the blacklist table over the Asterisk box's own ODBC connection, so call
+// routing keeps working even if this backend's HTTP server is unreachable.
+// A [BLACKLISTCHECK] stanza (func_odbc auto-prefixes dialplan functions with
+// ODBC_) must be declared once per Asterisk server in that server's
+// func_odbc.conf (see ASTERISK_CLUSTER_SETUP.md) — the backend has no access
+// to Asterisk's own config files to write it automatically. Written once (not
+// per tenant/number); safe to call on every startup — clears and rewrites the
+// same context.
+func EnsureBlacklistCheckSubroutine(db *sql.DB) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec(`DELETE FROM ast_extensions WHERE context='blacklist-check'`); err != nil {
+		return fmt.Errorf("clear blacklist-check context: %w", err)
+	}
+
+	entries := []struct{ p int; app, data string }{
+		{1, "NoOp", "Blacklist check for ${ARG1} (tenant ${ARG2})"},
+		{2, "Set", "BLOK=${ODBC_BLACKLISTCHECK(${ARG1},${ARG2})}"},
+		{3, "Return", "${BLOK}"},
+	}
+	for _, e := range entries {
+		if _, err := tx.Exec(`INSERT INTO ast_extensions (context,exten,priority,app,appdata) VALUES ('blacklist-check','s',$1,$2,$3)`,
+			e.p, e.app, e.data); err != nil {
+			return fmt.Errorf("insert blacklist-check s,%d: %w", e.p, err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit: %w", err)
+	}
+	log.Printf("[Asterisk] blacklist-check subroutine synced")
+	return nil
 }
 
 // EnsureWhitelistCheckSubroutine writes the shared [whitelist-check] Gosub
-// context: Gosub(whitelist-check,s,1(${CALLERID(num)},<tenantId>)) from any
-// KC number's dialplan returns "1"/"0" in GOSUB_RETVAL via our existing
-// /internal/whitelist/check endpoint. Written once (not per tenant/number);
-// safe to call on every startup — clears and rewrites the same context.
+// context: Gosub(whitelist-check,s,1(${CALLERID(num)},<tenantId>)) returns
+// "1" (allowed)/"0" (not on the whitelist) in GOSUB_RETVAL via the
+// ODBC_WHITELISTCHECK() func_odbc function. Only reached by numbers that
+// opted into the gate (ivr_configs.whitelist_enabled — see writeKCDialplan);
+// unlike blacklist-check this is a default-deny check, so an empty or
+// disabled whitelist for a tenant blocks every call to a gated number. A
+// [WHITELISTCHECK] stanza (func_odbc auto-prefixes with ODBC_) must be
+// declared once per Asterisk server in that server's func_odbc.conf (see
+// ASTERISK_CLUSTER_SETUP.md). Written once (not per tenant/number); safe to
+// call on every startup — clears and rewrites the same context.
 func EnsureWhitelistCheckSubroutine(db *sql.DB) error {
 	tx, err := db.Begin()
 	if err != nil {
@@ -43,10 +99,9 @@ func EnsureWhitelistCheckSubroutine(db *sql.DB) error {
 		return fmt.Errorf("clear whitelist-check context: %w", err)
 	}
 
-	url := fmt.Sprintf("%s/internal/whitelist/check?phone=${ARG1}&tenantId=${ARG2}&key=%s", publicBase, asteriskKey)
 	entries := []struct{ p int; app, data string }{
 		{1, "NoOp", "Whitelist check for ${ARG1} (tenant ${ARG2})"},
-		{2, "Set", fmt.Sprintf("WLOK=${CURL(%s)}", url)},
+		{2, "Set", "WLOK=${ODBC_WHITELISTCHECK(${ARG1},${ARG2})}"},
 		{3, "Return", "${WLOK}"},
 	}
 	for _, e := range entries {
@@ -65,8 +120,8 @@ func EnsureWhitelistCheckSubroutine(db *sql.DB) error {
 
 // EnsureBlockedContext writes the shared "blocked" context (Answer → privacy
 // notice → Hangup), reached via Goto(blocked,s,1) from any provider's own
-// dialplan when whitelist-check rejects a caller. Like whitelist-check, this
-// name is one of the small, fixed set statically declared once in
+// dialplan when blacklist-check or whitelist-check flags a caller. Like
+// those, this name is one of the small, fixed set statically declared once in
 // extensions.conf — written once (not per provider), safe to call on every
 // startup.
 func EnsureBlockedContext(db *sql.DB) error {
@@ -119,15 +174,22 @@ func syncProviderAnonymousFallback(tx *sql.Tx, providerID int) error {
 		return fmt.Errorf("clear %s s: %w", providerName, err)
 	}
 
-	rows, err := tx.Query(`SELECT id, tenant_id FROM kc_numbers WHERE provider_id = $1`, providerID)
+	rows, err := tx.Query(`
+		SELECT kn.id, kn.tenant_id, COALESCE(ic.whitelist_enabled, FALSE)
+		FROM kc_numbers kn
+		LEFT JOIN ivr_configs ic ON ic.kc_number_id = kn.id
+		WHERE kn.provider_id = $1`, providerID)
 	if err != nil {
 		return fmt.Errorf("lookup provider kc_numbers: %w", err)
 	}
-	type owned struct{ id, tenantID int }
+	type owned struct {
+		id, tenantID     int
+		whitelistEnabled bool
+	}
 	var nums []owned
 	for rows.Next() {
 		var n owned
-		if err := rows.Scan(&n.id, &n.tenantID); err != nil {
+		if err := rows.Scan(&n.id, &n.tenantID, &n.whitelistEnabled); err != nil {
 			rows.Close()
 			return err
 		}
@@ -137,28 +199,27 @@ func syncProviderAnonymousFallback(tx *sql.Tx, providerID int) error {
 	if len(nums) != 1 {
 		return nil
 	}
-	kcID, tenantID := nums[0].id, nums[0].tenantID
+	kcID, tenantID, whitelistEnabled := nums[0].id, nums[0].tenantID, nums[0].whitelistEnabled
 
-	entries := []struct{ p int; app, data string }{
-		{1, "NoOp", fmt.Sprintf("Anonymous inbound, tenant %d", tenantID)},
-		{2, "Answer", ""},
-		{3, "Gosub", fmt.Sprintf("whitelist-check,s,1(${CALLERID(num)},%d)", tenantID)},
-		{4, "GotoIf", `$["${GOSUB_RETVAL}" = "0"]?blocked,s,1`},
-		// 'c': continue in the dialplan (not hang up) if the connected
-		// agent's leg disappears mid-call — the Wait() below is what
-		// actually holds the caller for a possible reconnect; see
-		// writeKCDialplan for the matching, more-detailed comment.
-		{5, "Queue", fmt.Sprintf("%s,rHhc,,300", KCQueueName(kcID))},
-		{6, "Wait", "5"},
-		{7, "Hangup", ""},
+	b := newDialplanBuilder("s")
+	b.add("NoOp", fmt.Sprintf("Anonymous inbound, tenant %d", tenantID))
+	b.add("Answer", "")
+	addRecording(b)
+	if whitelistEnabled {
+		b.add("Gosub", fmt.Sprintf("whitelist-check,s,1(${CALLERID(num)},%d)", tenantID))
+		b.add("GotoIf", `$["${GOSUB_RETVAL}" = "0"]?blocked,s,1`)
 	}
-	for _, e := range entries {
-		if _, err := tx.Exec(`INSERT INTO ast_extensions (context,exten,priority,app,appdata) VALUES ($1,'s',$2,$3,$4)`,
-			providerName, e.p, e.app, e.data); err != nil {
-			return fmt.Errorf("insert %s s,%d: %w", providerName, e.p, err)
-		}
-	}
-	return nil
+	b.add("Gosub", fmt.Sprintf("blacklist-check,s,1(${CALLERID(num)},%d)", tenantID))
+	b.add("GotoIf", `$["${GOSUB_RETVAL}" = "1"]?blocked,s,1`)
+	// 'c': continue in the dialplan (not hang up) if the connected
+	// agent's leg disappears mid-call — the Wait() below is what
+	// actually holds the caller for a possible reconnect; see
+	// writeKCDialplan for the matching, more-detailed comment.
+	b.add("Queue", fmt.Sprintf("%s,rHhc,,300", KCQueueName(kcID)))
+	b.add("Wait", "5")
+	b.add("Hangup", "")
+
+	return b.writeTo(tx, providerName)
 }
 
 // kcNumberOwner returns the tenant_id that owns a kc_number, or 0 if not found.
@@ -243,9 +304,11 @@ func (b *dialplanBuilder) writeTo(tx *sql.Tx, context string) error {
 }
 
 // writeKCDialplan (re)writes a KC number's inbound flow directly under
-// <providerContext>,<number>: whitelist check (Gosub into the shared
-// subroutine, see EnsureWhitelistCheckSubroutine) → shared blocked context if
-// rejected (see EnsureBlockedContext) → optional work-hours gate → Answer →
+// <providerContext>,<number>: optional whitelist gate (see
+// EnsureWhitelistCheckSubroutine; only when whitelistEnabled) → blacklist
+// check (Gosub into the shared subroutine, see
+// EnsureBlacklistCheckSubroutine) → shared blocked context if either flags
+// the caller (see EnsureBlockedContext) → optional work-hours gate → Answer →
 // greeting → optional digit menu → default queue. The digit menu uses
 // Read()+GotoIf rather than Background+WaitExten: WaitExten's automatic
 // "t"/"i" timeout/invalid-digit fallback resolves relative to the *context*,
@@ -255,7 +318,7 @@ func (b *dialplanBuilder) writeTo(tx *sql.Tx, context string) error {
 // Shared by CreateKCNumber (initial, no menu/schedule yet) and
 // SyncKCNumberDialplan (after greeting/menu/schedule edits). Runs inside tx
 // so it's atomic with whatever else the caller is doing in the same transaction.
-func writeKCDialplan(tx *sql.Tx, context string, tenantID int, number, queueName, greeting string, waitTimeout, queueTimeout int, options []IVRDialplanOption, wh WorkHours) error {
+func writeKCDialplan(tx *sql.Tx, context string, tenantID int, number, queueName, greeting string, waitTimeout, queueTimeout int, options []IVRDialplanOption, wh WorkHours, whitelistEnabled bool) error {
 	if _, err := tx.Exec(`DELETE FROM ast_extensions WHERE context=$1 AND exten=$2`, context, number); err != nil {
 		return fmt.Errorf("clear number's dialplan: %w", err)
 	}
@@ -273,8 +336,12 @@ func writeKCDialplan(tx *sql.Tx, context string, tenantID int, number, queueName
 
 	b := newDialplanBuilder(number)
 	b.add("NoOp", fmt.Sprintf("KC number %s (tenant %d)", number, tenantID))
-	b.add("Gosub", fmt.Sprintf("whitelist-check,s,1(${CALLERID(num)},%d)", tenantID))
-	b.add("GotoIf", `$["${GOSUB_RETVAL}" = "0"]?blocked,s,1`)
+	if whitelistEnabled {
+		b.add("Gosub", fmt.Sprintf("whitelist-check,s,1(${CALLERID(num)},%d)", tenantID))
+		b.add("GotoIf", `$["${GOSUB_RETVAL}" = "0"]?blocked,s,1`)
+	}
+	b.add("Gosub", fmt.Sprintf("blacklist-check,s,1(${CALLERID(num)},%d)", tenantID))
+	b.add("GotoIf", `$["${GOSUB_RETVAL}" = "1"]?blocked,s,1`)
 
 	if wh.Enabled {
 		b.add("GotoIfTime", fmt.Sprintf("%s-%s,%s,*,*?{{open}}", wh.Start, wh.End, wh.Days))
@@ -285,6 +352,7 @@ func writeKCDialplan(tx *sql.Tx, context string, tenantID int, number, queueName
 
 	b.mark("open")
 	b.add("Answer", "")
+	addRecording(b)
 
 	if len(options) > 0 {
 		b.mark("replay")
@@ -369,7 +437,7 @@ func CreateKCNumber(db *sql.DB, tenantID, providerID int, number string) (int, e
 		return 0, fmt.Errorf("ast_queues insert: %w", err)
 	}
 
-	if err := writeKCDialplan(tx, providerName, tenantID, number, queueName, "beep", 5, 300, nil, WorkHours{}); err != nil {
+	if err := writeKCDialplan(tx, providerName, tenantID, number, queueName, "beep", 5, 300, nil, WorkHours{}, false); err != nil {
 		return 0, err
 	}
 
@@ -508,9 +576,15 @@ func UpsertKCQueue(db *sql.DB, kcNumberID int, strategy string, timeout, maxLen 
 	return nil
 }
 
-// SyncKCNumberDialplan rebuilds the IVR dialplan context for a single KC number.
-// Called after IVR config/menu changes. options is a list of {digit, app, appdata}.
-func SyncKCNumberDialplan(db *sql.DB, kcNumberID int, greetingFile string, waitTimeout, queueTimeout int, options []IVRDialplanOption, wh WorkHours) error {
+// SyncKCNumberDialplan rebuilds the IVR dialplan context for a single KC
+// number, and — since a provider's anonymous-inbound "s" fallback (see
+// syncProviderAnonymousFallback) applies the same gates and only tracks this
+// number's settings when the provider owns exactly one KC number — also
+// refreshes that fallback so it doesn't go stale after a change here (e.g. a
+// carrier that never populates the DID, so every inbound call actually runs
+// through "s" rather than this number's own exten). Called after IVR
+// config/menu changes. options is a list of {digit, app, appdata}.
+func SyncKCNumberDialplan(db *sql.DB, kcNumberID int, greetingFile string, waitTimeout, queueTimeout int, options []IVRDialplanOption, wh WorkHours, whitelistEnabled bool) error {
 	tenantID, err := kcNumberOwner(db, kcNumberID)
 	if err != nil {
 		return fmt.Errorf("lookup kc number: %w", err)
@@ -538,7 +612,11 @@ func SyncKCNumberDialplan(db *sql.DB, kcNumberID int, greetingFile string, waitT
 		return err
 	}
 
-	if err := writeKCDialplan(tx, providerName, tenantID, number, queueName, greetingFile, waitTimeout, queueTimeout, options, wh); err != nil {
+	if err := writeKCDialplan(tx, providerName, tenantID, number, queueName, greetingFile, waitTimeout, queueTimeout, options, wh, whitelistEnabled); err != nil {
+		return err
+	}
+
+	if err := syncProviderAnonymousFallback(tx, providerID); err != nil {
 		return err
 	}
 

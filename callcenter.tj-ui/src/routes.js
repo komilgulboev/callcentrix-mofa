@@ -10,7 +10,9 @@ const Tickets      = React.lazy(() => import('src/views/tickets/Tickets'))
 const TicketDetail = React.lazy(() => import('src/views/tickets/TicketDetail'))
 const Topics       = React.lazy(() => import('src/views/topics/Topics'))
 const IVR          = React.lazy(() => import('src/views/ivr/IVR'))
+const Blacklist    = React.lazy(() => import('src/views/blacklist/Blacklist'))
 const Whitelist    = React.lazy(() => import('src/views/whitelist/Whitelist'))
+const TicketsReport = React.lazy(() => import('src/views/reports/TicketsReport'))
 const Settings     = React.lazy(() => import('src/views/settings/Settings'))
 const Phone = React.lazy(() => import('src/views/phone/Phone.jsx'))
 
@@ -26,7 +28,9 @@ const routes = [
   { path: '/tickets/:id',  name: 'Ticket',       element: TicketDetail },
   { path: '/topics',       name: 'Topics',       element: Topics,      roles: [0, 1] },
   { path: '/ivr',          name: 'IVR',          element: IVR,         roles: [0, 1, 2] },
+  { path: '/blacklist',    name: 'Blacklist',    element: Blacklist,   roles: [0, 1] },
   { path: '/whitelist',    name: 'Whitelist',    element: Whitelist,   roles: [0, 1] },
+  { path: '/reports/tickets', name: 'Tickets Report', element: TicketsReport, roles: [0, 1, 2] },
   { path: '/settings',     name: 'Settings',     element: Settings,    roles: [0, 1] },
 ]
 

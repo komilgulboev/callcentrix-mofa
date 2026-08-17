@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from 'react'
 import {
   CCard, CCardBody, CCardHeader, CNav, CNavItem, CNavLink,
   CTabContent, CTabPane, CButton, CForm, CFormLabel, CFormInput,
-  CFormSelect, CRow, CCol, CTable, CTableHead, CTableHeaderCell,
+  CFormSelect, CFormCheck, CRow, CCol, CTable, CTableHead, CTableHeaderCell,
   CTableBody, CTableRow, CTableDataCell, CBadge, CAlert, CSpinner,
   CModal, CModalHeader, CModalTitle, CModalBody, CModalFooter,
 } from '@coreui/react'
@@ -44,7 +44,7 @@ export default function NumberEditor({ kcNumber, onBack }) {
   const [error,   setError]   = useState('')
   const [success, setSuccess] = useState('')
 
-  const [config,   setConfig]   = useState({ strategy: 'ringall', waitTimeout: 5, queueTimeout: 300, maxCallers: 0, mohClass: 'default' })
+  const [config,   setConfig]   = useState({ strategy: 'ringall', waitTimeout: 5, queueTimeout: 300, maxCallers: 0, mohClass: 'default', whitelistEnabled: false })
   const [options,  setOptions]  = useState([])
   const [members,  setMembers]  = useState([])
   const [availUsers, setAvailUsers] = useState([])
@@ -313,6 +313,20 @@ export default function NumberEditor({ kcNumber, onBack }) {
                         onChange={e => setConfig(c => ({ ...c, queueTimeout: +e.target.value }))} />
                     </CCol>
                   </CRow>
+
+                  <hr />
+
+                  <div>
+                    <CFormCheck
+                      label={t('number_editor.whitelist_gate_label')}
+                      checked={config.whitelistEnabled}
+                      onChange={e => setConfig(c => ({ ...c, whitelistEnabled: e.target.checked }))}
+                    />
+                    <div className="text-muted small mt-1">
+                      {t('number_editor.whitelist_gate_hint')}
+                    </div>
+                  </div>
+
                   <div>
                     <CButton color="primary" onClick={handleSaveConfig} disabled={saving}>
                       {saving ? <CSpinner size="sm" className="me-2" /> : null}

@@ -69,13 +69,54 @@ CREATE TABLE IF NOT EXISTS topic_catalog (
 );
 
 ALTER TABLE tickets ADD COLUMN IF NOT EXISTS topic_id INT REFERENCES topic_catalog(id) ON DELETE SET NULL;
+-- The specialist (TenantAdmin/Supervisor) an operator has assigned this
+-- ticket to — distinct from user_id, which is whoever created/handled it.
+ALTER TABLE tickets ADD COLUMN IF NOT EXISTS assigned_user_id INT REFERENCES users(id) ON DELETE SET NULL;
+
+-- ─── Blacklist (phone numbers) ───────────────────────────────────────────────
+-- Default-allow gate: callers are let through unless their number is an
+-- active, non-expired blacklist entry for the tenant. expires_at NULL means
+-- the block is permanent. Applies to every KC number of the tenant.
+CREATE TABLE IF NOT EXISTS blacklist (
+    id          SERIAL PRIMARY KEY,
+    tenant_id   INT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    phone       VARCHAR(50) NOT NULL,
+    comment     VARCHAR(255) DEFAULT '',
+    active      BOOLEAN DEFAULT TRUE,
+    expires_at  TIMESTAMPTZ,
+    created_at  TIMESTAMPTZ DEFAULT NOW(),
+    updated_at  TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE (tenant_id, phone)
+);
+CREATE INDEX IF NOT EXISTS idx_blacklist_tenant ON blacklist(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_blacklist_phone  ON blacklist(phone);
+
+-- One-time backfill: dialplan rows written by the previous (whitelist,
+-- default-deny) code still literally call Gosub(whitelist-check,...) gated on
+-- GOSUB_RETVAL="0". EnsureBlacklistCheckSubroutine (see internal/asterisk)
+-- only (re)writes the shared subroutine context itself — a KC number's own
+-- dialplan and a provider's anonymous-fallback "s" extension are only
+-- rewritten on specific triggers (create/delete/sync), so a plain binary
+-- upgrade would otherwise leave existing numbers pointed at the old,
+-- inverted gate (and the dead /internal/whitelist/check route). Rewrite them
+-- here so upgrading is enough. Safe to rerun: matches 0 rows once applied.
+UPDATE ast_extensions SET appdata = REPLACE(appdata, 'whitelist-check,s,1(', 'blacklist-check,s,1(')
+WHERE app = 'Gosub' AND appdata LIKE 'whitelist-check,s,1(%';
+
+UPDATE ast_extensions SET appdata = '$["${GOSUB_RETVAL}" = "1"]?blocked,s,1'
+WHERE app = 'GotoIf' AND appdata = '$["${GOSUB_RETVAL}" = "0"]?blocked,s,1';
 
 -- ─── Whitelist (phone numbers) ───────────────────────────────────────────────
+-- Opt-in default-deny gate, per KC number (see ivr_configs.whitelist_enabled
+-- below): when enabled for a number, callers are blocked unless their number
+-- is an active whitelist entry for the tenant. Entries themselves are
+-- tenant-wide, same as blacklist — the per-number flag only controls whether
+-- that number enforces the gate.
 CREATE TABLE IF NOT EXISTS whitelist (
     id          SERIAL PRIMARY KEY,
     tenant_id   INT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     phone       VARCHAR(50) NOT NULL,
-    description VARCHAR(255) DEFAULT '',
+    comment     VARCHAR(255) DEFAULT '',
     active      BOOLEAN DEFAULT TRUE,
     created_at  TIMESTAMPTZ DEFAULT NOW(),
     updated_at  TIMESTAMPTZ DEFAULT NOW(),
@@ -157,6 +198,10 @@ ALTER TABLE ivr_configs ADD COLUMN IF NOT EXISTS work_hours_enabled BOOLEAN DEFA
 ALTER TABLE ivr_configs ADD COLUMN IF NOT EXISTS work_hours_start VARCHAR(5) DEFAULT '09:00';
 ALTER TABLE ivr_configs ADD COLUMN IF NOT EXISTS work_hours_end VARCHAR(5) DEFAULT '18:00';
 ALTER TABLE ivr_configs ADD COLUMN IF NOT EXISTS work_days VARCHAR(30) DEFAULT 'mon,tue,wed,thu,fri';
+-- Per-number opt-in for the whitelist gate (see the whitelist table above).
+-- Defaults to FALSE so existing/new numbers keep working without an admin
+-- having to populate a tenant's whitelist first.
+ALTER TABLE ivr_configs ADD COLUMN IF NOT EXISTS whitelist_enabled BOOLEAN DEFAULT FALSE;
 
 -- One-time backfill: pre-existing configs (from before KC numbers existed) that
 -- already had a did_number get a matching kc_numbers row so they aren't orphaned.
@@ -298,3 +343,4 @@ CREATE INDEX IF NOT EXISTS idx_users_tenant      ON users(tenant_id);
 CREATE INDEX IF NOT EXISTS idx_users_server      ON users(server_id);
 CREATE INDEX IF NOT EXISTS idx_topic_tenant      ON topic_catalog(tenant_id);
 CREATE INDEX IF NOT EXISTS idx_tickets_topic     ON tickets(topic_id);
+CREATE INDEX IF NOT EXISTS idx_tickets_assigned  ON tickets(assigned_user_id);

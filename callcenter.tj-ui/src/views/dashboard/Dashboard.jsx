@@ -71,6 +71,15 @@ function fmtSecs(s) {
   return `${m}m ${s % 60}s`
 }
 
+// Unlike fmtSecs, 0 is a real, current value here (a caller who just joined
+// the queue) rather than "hasn't happened yet" — so it must render as a
+// duration, not '—'.
+function fmtWait(s) {
+  const sec = s || 0
+  const m = Math.floor(sec / 60)
+  return `${m}m ${sec % 60}s`
+}
+
 // Combines status + call direction into one label — "ringing" alone doesn't
 // say whether the agent is placing or receiving that call.
 function agentStateLabel(a, t) {
@@ -101,6 +110,7 @@ function useAgentsMonitor() {
 
   const agents = Object.values(snapshot?.agents || {})
   const queues = Object.values(snapshot?.queues || {})
+  const waitingCallers = snapshot?.waitingCallers || []
 
   const handlePause = async (a) => {
     setActing(a.sipNo)
@@ -117,6 +127,7 @@ function useAgentsMonitor() {
   return {
     loading: snapshot === null,
     agents,
+    waitingCallers,
     onlineCount:     agents.filter(a => a.status !== 'offline').length,
     activeCallCount: Object.keys(snapshot?.calls || {}).length,
     waitingCount:    queues.reduce((s, q) => s + (q.waiting || 0), 0),
@@ -199,6 +210,50 @@ function AgentsCard({ loading, agents, canManage, acting, onPause, onHangup }) {
   )
 }
 
+function WaitingCallersCard({ loading, waitingCallers }) {
+  const { t } = useTranslation()
+  return (
+    <CCard>
+      <CCardHeader>{t('dashboard.waiting_title')} ({waitingCallers.length})</CCardHeader>
+      <CCardBody className="p-0">
+        {loading ? (
+          <div className="text-center py-5"><CSpinner size="sm" /></div>
+        ) : (
+          <CTable hover responsive className="mb-0">
+            <CTableHead>
+              <CTableRow>
+                <CTableHeaderCell>{t('dashboard.col_caller')}</CTableHeaderCell>
+                <CTableHeaderCell>{t('dashboard.col_queue')}</CTableHeaderCell>
+                <CTableHeaderCell>{t('dashboard.col_wait_time')}</CTableHeaderCell>
+              </CTableRow>
+            </CTableHead>
+            <CTableBody>
+              {waitingCallers.map((wc) => (
+                <CTableRow key={wc.channel || `${wc.queue}-${wc.callerId}`}>
+                  <CTableDataCell className="fw-semibold font-monospace">{wc.callerId || '—'}</CTableDataCell>
+                  <CTableDataCell className="text-muted small">{wc.queue}</CTableDataCell>
+                  <CTableDataCell>
+                    <CBadge color={wc.waitSeconds >= 60 ? 'danger' : wc.waitSeconds >= 30 ? 'warning' : 'secondary'}>
+                      {fmtWait(wc.waitSeconds)}
+                    </CBadge>
+                  </CTableDataCell>
+                </CTableRow>
+              ))}
+              {!waitingCallers.length && (
+                <CTableRow>
+                  <CTableDataCell colSpan={3} className="text-center text-muted py-4">
+                    {t('dashboard.no_waiting')}
+                  </CTableDataCell>
+                </CTableRow>
+              )}
+            </CTableBody>
+          </CTable>
+        )}
+      </CCardBody>
+    </CCard>
+  )
+}
+
 export default function Dashboard() {
   const { t } = useTranslation()
   const { isSuperAdmin, isTenantAdmin, isSupervisor } = useAuthStore()
@@ -221,7 +276,7 @@ export default function Dashboard() {
       .catch(() => setTodayAnswered('—'))
   }, [])
 
-  const { loading, agents, onlineCount, activeCallCount, waitingCount, acting, handlePause, handleHangup } = useAgentsMonitor()
+  const { loading, agents, waitingCallers, onlineCount, activeCallCount, waitingCount, acting, handlePause, handleHangup } = useAgentsMonitor()
   const todayMissed = (typeof todayCalls === 'number' && typeof todayAnswered === 'number')
     ? todayCalls - todayAnswered
     : null
@@ -253,6 +308,12 @@ export default function Dashboard() {
             loading={loading} agents={agents} canManage={canManage}
             acting={acting} onPause={handlePause} onHangup={handleHangup}
           />
+        </CCol>
+      </CRow>
+
+      <CRow className="g-3 mt-1">
+        <CCol xl={12}>
+          <WaitingCallersCard loading={loading} waitingCallers={waitingCallers} />
         </CCol>
       </CRow>
 

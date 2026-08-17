@@ -9,8 +9,10 @@ import {
   cilUserFollow,
   cilTag,
   cilDialpad,
+  cilBan,
   cilShieldAlt,
   cilLockLocked,
+  cilChart,
 } from '@coreui/icons'
 
 const navigation = [
@@ -22,11 +24,14 @@ const navigation = [
   { component: 'CNavItem',  name: 'nav.unauthorized_users', to: '/users/unauthorized', icon: cilLockLocked, roles: [0] },
   { component: 'CNavItem',  name: 'nav.topics',         to: '/topics',       icon: cilTag,         roles: [0, 1] },
   { component: 'CNavItem',  name: 'nav.ivr',            to: '/ivr',          icon: cilDialpad,     roles: [0, 1, 2] },
+  { component: 'CNavItem',  name: 'nav.blacklist',      to: '/blacklist',    icon: cilBan,         roles: [0, 1] },
   { component: 'CNavItem',  name: 'nav.whitelist',      to: '/whitelist',    icon: cilShieldAlt,   roles: [0, 1] },
   { component: 'CNavTitle', name: 'nav.call_center' },
   { component: 'CNavItem',  name: 'nav.webphone',       to: '/webphone',     icon: cilPhone },
   { component: 'CNavItem',  name: 'nav.cdr',            to: '/cdr',          icon: cilList,        roles: [0, 1, 2] },
   { component: 'CNavItem',  name: 'nav.tickets',        to: '/tickets',      icon: cilDescription },
+  { component: 'CNavTitle', name: 'nav.reports_group',  roles: [0, 1, 2] },
+  { component: 'CNavItem',  name: 'nav.reports_tickets', to: '/reports/tickets', icon: cilChart, roles: [0, 1, 2] },
   { component: 'CNavTitle', name: 'nav.settings_group', roles: [0, 1] },
   { component: 'CNavItem',  name: 'nav.settings',       to: '/settings',     icon: cilSettings,    roles: [0, 1] },
 ]

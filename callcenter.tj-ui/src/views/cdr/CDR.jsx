@@ -95,6 +95,7 @@ export default function CDR() {
                   <CTableHeaderCell>{t('cdr.col_to')}</CTableHeaderCell>
                   <CTableHeaderCell>{t('cdr.col_duration')}</CTableHeaderCell>
                   <CTableHeaderCell>{t('cdr.col_result')}</CTableHeaderCell>
+                  <CTableHeaderCell>{t('cdr.col_recording_path')}</CTableHeaderCell>
                   <CTableHeaderCell></CTableHeaderCell>
                 </CTableRow>
               </CTableHead>
@@ -112,6 +113,9 @@ export default function CDR() {
                         {t(DISPOSITION_KEY[r.disposition] ?? r.disposition, { defaultValue: r.disposition })}
                       </CBadge>
                     </CTableDataCell>
+                    <CTableDataCell className="text-muted small font-monospace">
+                      {r.userField || '—'}
+                    </CTableDataCell>
                     <CTableDataCell>
                       {r.recording && (
                         <CButton size="sm" color="light" href={cdrApi.audio(r.id)} target="_blank" title={t('cdr.play_recording')}>
@@ -123,7 +127,7 @@ export default function CDR() {
                 ))}
                 {!rows.length && (
                   <CTableRow>
-                    <CTableDataCell colSpan={6} className="text-center text-muted py-4">{t('cdr.empty')}</CTableDataCell>
+                    <CTableDataCell colSpan={7} className="text-center text-muted py-4">{t('cdr.empty')}</CTableDataCell>
                   </CTableRow>
                 )}
               </CTableBody>

@@ -85,6 +85,23 @@ export const tickets = {
   remove:  (id)        => del(`/api/tickets/${id}`),
   comment: (id, text)  => post(`/api/tickets/${id}/comments`, { text }),
   comments:(id)        => get(`/api/tickets/${id}/comments`),
+  assign:  (id, userId) => patch(`/api/tickets/${id}/assign`, { userId }),
+  assignableUsers: ()   => get('/api/tickets/assignable-users'),
+}
+
+// ─── Reports ─────────────────────────────────────────────────
+export const reports = {
+  tickets: (params) => get('/api/reports/tickets' + toQuery(params)),
+}
+
+// ─── Blacklist ───────────────────────────────────────────────
+export const blacklist = {
+  list:   (tenantId, search) => get(`/api/blacklist?tenantId=${tenantId}` + (search ? `&search=${encodeURIComponent(search)}` : '')),
+  create: (tenantId, data)   => post(`/api/blacklist?tenantId=${tenantId}`, data),
+  update: (tenantId, id, data) => put(`/api/blacklist/${id}?tenantId=${tenantId}`, data),
+  remove: (tenantId, id)     => del(`/api/blacklist/${id}?tenantId=${tenantId}`),
+  toggle: (tenantId, id)     => patch(`/api/blacklist/${id}/toggle?tenantId=${tenantId}`),
+  check:  (tenantId, phone)  => get(`/api/blacklist/check?tenantId=${tenantId}&phone=${encodeURIComponent(phone)}`),
 }
 
 // ─── Whitelist ───────────────────────────────────────────────

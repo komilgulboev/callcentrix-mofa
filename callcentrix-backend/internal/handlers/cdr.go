@@ -2,16 +2,21 @@ package handlers
 
 import (
 	"database/sql"
+	"mime"
 	"net/http"
+	"path/filepath"
 	"strconv"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/minio/minio-go/v7"
 	mw "callcentrix/internal/middleware"
 )
 
 type CDRHandler struct {
-	DB           *sql.DB
-	RecordingURL string
+	DB     *sql.DB
+	Minio  *minio.Client // nil if MinIO isn't configured — Audio then 503s
+	Bucket string
 }
 
 type CDRRecord struct {
@@ -135,6 +140,15 @@ func (h *CDRHandler) Get(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, rec)
 }
 
+// Audio streams a call recording from MinIO through this same
+// JWT/role-gated endpoint, rather than redirecting the browser straight to
+// MinIO. That keeps MinIO itself fully private (no anonymous bucket access,
+// no address the browser ever needs to reach directly) and means a
+// bookmarked/leaked URL is useless without a valid session, since every
+// request re-checks auth here. http.ServeContent drives it so Range
+// requests (seeking within the recording) work correctly — minio.Object
+// implements io.ReadSeeker, translating each Seek into a ranged GetObject
+// call under the hood.
 func (h *CDRHandler) Audio(w http.ResponseWriter, r *http.Request) {
 	id, _ := strconv.Atoi(chi.URLParam(r, "id"))
 	var userField string
@@ -144,5 +158,28 @@ func (h *CDRHandler) Audio(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "no recording")
 		return
 	}
-	http.Redirect(w, r, h.RecordingURL+"/"+userField, http.StatusFound)
+	if h.Minio == nil {
+		writeError(w, http.StatusServiceUnavailable, "recording storage not configured")
+		return
+	}
+
+	obj, err := h.Minio.GetObject(r.Context(), h.Bucket, userField, minio.GetObjectOptions{})
+	if err != nil {
+		writeError(w, http.StatusNotFound, "recording not found")
+		return
+	}
+	defer obj.Close()
+
+	stat, err := obj.Stat()
+	if err != nil {
+		writeError(w, http.StatusNotFound, "recording not found")
+		return
+	}
+
+	if ct := mime.TypeByExtension(strings.ToLower(filepath.Ext(userField))); ct != "" {
+		w.Header().Set("Content-Type", ct)
+	} else {
+		w.Header().Set("Content-Type", "audio/wav")
+	}
+	http.ServeContent(w, r, userField, stat.LastModified, obj)
 }
