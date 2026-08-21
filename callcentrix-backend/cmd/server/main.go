@@ -24,7 +24,8 @@ import (
 )
 
 // Overridden at build time via:
-//   go build -ldflags "-X main.buildCommit=<hash> -X main.buildTime=<ts>"
+//
+//	go build -ldflags "-X main.buildCommit=<hash> -X main.buildTime=<ts>"
 var (
 	buildCommit = "dev"
 	buildTime   = "unknown"
@@ -34,8 +35,12 @@ func main() {
 	cfg := config.Load()
 
 	database, err := db.Connect(cfg.DBDSN)
-	if err != nil { log.Fatalf("DB connect: %v", err) }
-	if err := db.Migrate(database); err != nil { log.Fatalf("DB migrate: %v", err) }
+	if err != nil {
+		log.Fatalf("DB connect: %v", err)
+	}
+	if err := db.Migrate(database); err != nil {
+		log.Fatalf("DB migrate: %v", err)
+	}
 
 	if err := asterisk.EnsureBlacklistCheckSubroutine(database); err != nil {
 		log.Printf("[Asterisk] blacklist-check subroutine warning: %v", err)
@@ -45,6 +50,21 @@ func main() {
 	}
 	if err := asterisk.EnsureBlockedContext(database); err != nil {
 		log.Printf("[Asterisk] blocked context warning: %v", err)
+	}
+	// Re-applies every tenant's dialplan context (internal routing + outbound
+	// trunk rule) from its current tenants row, so a tenant whose
+	// ast_extensions rows predate this codebase (or were written some other
+	// way) doesn't keep stale/incorrect rows forever — see
+	// asterisk.ResyncAllTenantContexts for the exact bug this fixes.
+	if err := asterisk.ResyncAllTenantContexts(database); err != nil {
+		log.Printf("[Asterisk] resync all tenant contexts warning: %v", err)
+	}
+	// Re-applies every KC number's dialplan/queue settings from its stored
+	// ivr_configs on every startup, so a fix to how that dialplan is
+	// generated (e.g. call-recording linkage) reaches numbers nobody has
+	// happened to resave since — see handlers.ResyncAllDialplans.
+	if err := handlers.ResyncAllDialplans(database); err != nil {
+		log.Printf("[IVR] resync all dialplans warning: %v", err)
 	}
 
 	// Fallback AMI client for the single default server (cfg.AMIAddr) — used
@@ -76,7 +96,9 @@ func main() {
 
 	go func() {
 		ticker := time.NewTicker(2 * time.Second)
-		for range ticker.C { hub.Broadcast(monitor.Snapshot()) }
+		for range ticker.C {
+			hub.Broadcast(monitor.Snapshot())
+		}
 	}()
 
 	go func() {
@@ -88,12 +110,16 @@ func main() {
 		}
 	}()
 
-	authH := &handlers.AuthHandler{DB: database, JWTSecret: cfg.JWTSecret, JWTMinutes: cfg.JWTMinutes}
+	authH := &handlers.AuthHandler{DB: database, JWTSecret: cfg.JWTSecret, JWTMinutes: cfg.JWTMinutes, JWTOperatorMinutes: cfg.JWTOperatorMinutes}
 	tenantsH := &handlers.TenantsHandler{DB: database, AMI: amiRegistry}
-	usersH   := &handlers.UsersHandler{DB: database, SIPTransport: cfg.SIPTransport}
+	usersH := &handlers.UsersHandler{DB: database, SIPTransport: cfg.SIPTransport}
 	ticketsH := &handlers.TicketsHandler{DB: database}
-	topicsH  := &handlers.TopicsHandler{DB: database}
-	ivrH       := &handlers.IVRHandler{DB: database, UploadsDir: cfg.UploadsDir}
+	tasksH := &handlers.TasksHandler{DB: database}
+	// Long-polls Telegram for task-status button presses — sleeps/retries on
+	// its own if no bot token is configured yet, see RunTelegramBot.
+	go tasksH.RunTelegramBot()
+	topicsH := &handlers.TopicsHandler{DB: database}
+	ivrH := &handlers.IVRHandler{DB: database, UploadsDir: cfg.UploadsDir}
 	kcNumbersH := &handlers.KCNumbersHandler{DB: database, AMI: amiRegistry}
 	providersH := &handlers.ProvidersHandler{DB: database, AMI: amiRegistry}
 	asteriskServersH := &handlers.AsteriskServersHandler{DB: database, AMI: amiRegistry, Monitor: monitor}
@@ -107,6 +133,16 @@ func main() {
 			log.Printf("CDR DB connect warning: %v", err)
 		}
 	}
+	// call_outcomes has to live alongside ast_cdr for CDRHandler.List's JOIN
+	// to work, so it's created against cdrDB specifically rather than via
+	// the main migration.sql (which only ever runs against `database`).
+	if err := ami.EnsureCallOutcomesTable(cdrDB); err != nil {
+		log.Printf("[Monitor] ensure call_outcomes table: %v", err)
+	}
+	if err := handlers.EnsureLinkedIDColumn(cdrDB); err != nil {
+		log.Printf("[CDR] ensure ast_cdr.linkedid column: %v", err)
+	}
+	monitor.SetDB(cdrDB)
 
 	// Recordings live in a private MinIO bucket — only this backend talks to
 	// it (see CDRHandler.Audio), so the browser never learns MinIO's address
@@ -122,14 +158,17 @@ func main() {
 		} else {
 			minioClient = mc
 		}
+	} else {
+		log.Printf("MinIO not configured (MINIO_ENDPOINT empty) — call recordings and knowledge base media will be unavailable")
 	}
 
-	cdrH     := &handlers.CDRHandler{DB: cdrDB, Minio: minioClient, Bucket: cfg.MinioBucket}
+	cdrH := &handlers.CDRHandler{DB: cdrDB, Minio: minioClient, Bucket: cfg.MinioBucket}
+	kbH := &handlers.KnowledgeBaseHandler{DB: database, Minio: minioClient, Bucket: cfg.MinioBucket}
 	reportsH := &handlers.ReportsHandler{DB: database, CDRDB: cdrDB}
 	settingsH := &handlers.SettingsHandler{DB: database, UploadsDir: cfg.UploadsDir}
-	regH := &handlers.RegistrationHandler{DB: database, JWTSecret: cfg.JWTSecret, JWTMinutes: cfg.JWTMinutes, SIPTransport: cfg.SIPTransport}
+	regH := &handlers.RegistrationHandler{DB: database, JWTSecret: cfg.JWTSecret, JWTMinutes: cfg.JWTMinutes, JWTOperatorMinutes: cfg.JWTOperatorMinutes, SIPTransport: cfg.SIPTransport}
 	monitorH := &handlers.MonitorHandler{DB: database, Monitor: monitor, Hub: hub, AMI: amiRegistry}
-	phoneH   := &handlers.PhoneHandler{DB: database, AsteriskWSURI: cfg.AsteriskWSURI, SIPDomain: cfg.SIPDomain, Monitor: monitor, AMI: amiRegistry}
+	phoneH := &handlers.PhoneHandler{DB: database, AsteriskWSURI: cfg.AsteriskWSURI, SIPDomain: cfg.SIPDomain, Monitor: monitor, AMI: amiRegistry}
 
 	r := chi.NewRouter()
 	r.Use(chimw.Logger)
@@ -154,86 +193,131 @@ func main() {
 	})
 
 	// Public branding endpoints — the login screen (pre-auth) needs these.
-	r.Get("/api/settings/branding",      settingsH.GetBranding)
+	r.Get("/api/settings/branding", settingsH.GetBranding)
 	r.Get("/api/settings/branding/logo", settingsH.Logo)
 
-	r.Post("/api/auth/login",       authH.Login)
-	r.Post("/api/auth/register",    regH.Register)
+	r.Post("/api/auth/login", authH.Login)
+	r.Post("/api/auth/register", regH.Register)
 	r.Post("/api/auth/verify-code", regH.VerifyCode)
 
 	r.Group(func(r chi.Router) {
 		r.Use(mw.Auth(cfg.JWTSecret))
 
-		r.Get("/api/auth/me",      authH.Me)
+		r.Get("/api/auth/me", authH.Me)
 		r.Post("/api/auth/logout", authH.Logout)
+		r.Patch("/api/auth/password", authH.ChangePassword)
 
 		// Tenants — SuperAdmin only
 		r.Group(func(r chi.Router) {
 			r.Use(mw.RequireRole(0))
-			r.Get("/api/tenants",                          tenantsH.List)
-			r.Post("/api/tenants",                         tenantsH.Create)
-			r.Get("/api/tenants/{id}",                     tenantsH.Get)
-			r.Put("/api/tenants/{id}",                     tenantsH.Update)
-			r.Delete("/api/tenants/{id}",                  tenantsH.Delete)
-			r.Patch("/api/tenants/{id}/activate",          tenantsH.Activate)
-			r.Patch("/api/tenants/{id}/deactivate",        tenantsH.Deactivate)
-			r.Post("/api/tenants/{id}/users",              tenantsH.AssignUser)
-			r.Delete("/api/tenants/{id}/users/{userId}",   tenantsH.UnassignUser)
-			r.Post("/api/tenants/{id}/kc-numbers",             kcNumbersH.Create)
+			r.Get("/api/tenants", tenantsH.List)
+			r.Post("/api/tenants", tenantsH.Create)
+			r.Get("/api/tenants/{id}", tenantsH.Get)
+			r.Put("/api/tenants/{id}", tenantsH.Update)
+			r.Delete("/api/tenants/{id}", tenantsH.Delete)
+			r.Patch("/api/tenants/{id}/activate", tenantsH.Activate)
+			r.Patch("/api/tenants/{id}/deactivate", tenantsH.Deactivate)
+			r.Post("/api/tenants/{id}/users", tenantsH.AssignUser)
+			r.Delete("/api/tenants/{id}/users/{userId}", tenantsH.UnassignUser)
+			r.Post("/api/tenants/{id}/kc-numbers", kcNumbersH.Create)
 			r.Delete("/api/tenants/{id}/kc-numbers/{numberId}", kcNumbersH.Delete)
 
-			r.Get("/api/providers",           providersH.List)
-			r.Post("/api/providers",          providersH.Create)
-			r.Put("/api/providers/{id}",      providersH.Update)
-			r.Delete("/api/providers/{id}",   providersH.Delete)
+			r.Get("/api/providers", providersH.List)
+			r.Post("/api/providers", providersH.Create)
+			r.Put("/api/providers/{id}", providersH.Update)
+			r.Delete("/api/providers/{id}", providersH.Delete)
 
-			r.Get("/api/asterisk-servers",         asteriskServersH.List)
-			r.Post("/api/asterisk-servers",        asteriskServersH.Create)
-			r.Put("/api/asterisk-servers/{id}",    asteriskServersH.Update)
+			r.Get("/api/asterisk-servers", asteriskServersH.List)
+			r.Post("/api/asterisk-servers", asteriskServersH.Create)
+			r.Put("/api/asterisk-servers/{id}", asteriskServersH.Update)
 			r.Delete("/api/asterisk-servers/{id}", asteriskServersH.Delete)
 
-			r.Put("/api/settings/branding",       settingsH.UpdateBranding)
+			r.Put("/api/settings/branding", settingsH.UpdateBranding)
 			r.Post("/api/settings/branding/logo", settingsH.UploadLogo)
-			r.Get("/api/settings/smpp",           settingsH.GetSMPPSettings)
-			r.Put("/api/settings/smpp",            settingsH.UpdateSMPPSettings)
+			r.Get("/api/settings/smpp", settingsH.GetSMPPSettings)
+			r.Put("/api/settings/smpp", settingsH.UpdateSMPPSettings)
+			r.Get("/api/settings/telegram", settingsH.GetTelegramSettings)
+			r.Put("/api/settings/telegram", settingsH.UpdateTelegramSettings)
 
-			r.Get("/api/users/unauthorized",    usersH.ListUnauthorized)
+			r.Get("/api/users/unauthorized", usersH.ListUnauthorized)
 			r.Post("/api/users/{id}/authorize", usersH.Authorize)
 		})
 
 		// Users — SuperAdmin + TenantAdmin
 		r.Group(func(r chi.Router) {
 			r.Use(mw.RequireRole(1))
-			r.Get("/api/users",                   usersH.List)
-			r.Post("/api/users",                  usersH.Create)
-			r.Get("/api/users/{id}",              usersH.Get)
-			r.Put("/api/users/{id}",              usersH.Update)
-			r.Delete("/api/users/{id}",           usersH.Delete)
-			r.Patch("/api/users/{id}/activate",   usersH.Activate)
+			r.Get("/api/users", usersH.List)
+			r.Post("/api/users", usersH.Create)
+			r.Get("/api/users/{id}", usersH.Get)
+			r.Put("/api/users/{id}", usersH.Update)
+			r.Delete("/api/users/{id}", usersH.Delete)
+			r.Patch("/api/users/{id}/activate", usersH.Activate)
 			r.Patch("/api/users/{id}/deactivate", usersH.Deactivate)
-			r.Patch("/api/users/{id}/password",   usersH.ResetPassword)
+			r.Patch("/api/users/{id}/password", usersH.ResetPassword)
 		})
 
 		// Topic Catalog — read for all, write for SuperAdmin + TenantAdmin
 		r.Get("/api/topics", topicsH.ListMy)
 		r.Group(func(r chi.Router) {
 			r.Use(mw.RequireRole(1))
-			r.Get("/api/tenants/{id}/topics",              topicsH.List)
-			r.Post("/api/tenants/{id}/topics",             topicsH.Create)
-			r.Put("/api/tenants/{id}/topics/{topicId}",    topicsH.Update)
+			r.Get("/api/tenants/{id}/topics", topicsH.List)
+			r.Post("/api/tenants/{id}/topics", topicsH.Create)
+			r.Put("/api/tenants/{id}/topics/{topicId}", topicsH.Update)
 			r.Delete("/api/tenants/{id}/topics/{topicId}", topicsH.Delete)
 		})
 
+		// Knowledge Base — categories read for all, write for SuperAdmin only;
+		// articles read for all (tenant-scoped, see ListArticles/GetArticle),
+		// write for TenantAdmin only (see CreateArticle's own UserType check).
+		r.Get("/api/kb/categories", kbH.ListCategories)
+		r.Get("/api/kb/articles", kbH.ListArticles)
+		r.Get("/api/kb/articles/{id}", kbH.GetArticle)
+		r.Get("/api/kb/articles/{id}/media/{mediaId}", kbH.ArticleMedia)
+		r.Get("/api/kb/tags", kbH.ListTags)
+		r.Group(func(r chi.Router) {
+			r.Use(mw.RequireRole(0))
+			r.Post("/api/kb/categories", kbH.CreateCategory)
+			r.Put("/api/kb/categories/{id}", kbH.UpdateCategory)
+			r.Delete("/api/kb/categories/{id}", kbH.DeleteCategory)
+		})
+		r.Group(func(r chi.Router) {
+			r.Use(mw.RequireRole(1))
+			r.Post("/api/kb/articles", kbH.CreateArticle)
+			r.Put("/api/kb/articles/{id}", kbH.UpdateArticle)
+			r.Delete("/api/kb/articles/{id}", kbH.DeleteArticle)
+			r.Post("/api/kb/articles/{id}/media", kbH.UploadArticleMedia)
+			r.Delete("/api/kb/articles/{id}/media/{mediaId}", kbH.DeleteArticleMedia)
+		})
+
 		// Tickets — all roles
-		r.Get("/api/tickets",                  ticketsH.List)
-		r.Post("/api/tickets",                 ticketsH.Create)
+		r.Get("/api/tickets", ticketsH.List)
+		r.Post("/api/tickets", ticketsH.Create)
 		r.Get("/api/tickets/assignable-users", ticketsH.AssignableUsers)
-		r.Get("/api/tickets/{id}",             ticketsH.Get)
-		r.Put("/api/tickets/{id}",             ticketsH.Update)
-		r.Delete("/api/tickets/{id}",          ticketsH.Delete)
-		r.Patch("/api/tickets/{id}/assign",    ticketsH.Assign)
-		r.Get("/api/tickets/{id}/comments",    ticketsH.ListComments)
-		r.Post("/api/tickets/{id}/comments",   ticketsH.AddComment)
+		r.Get("/api/tickets/{id}", ticketsH.Get)
+		r.Put("/api/tickets/{id}", ticketsH.Update)
+		r.Delete("/api/tickets/{id}", ticketsH.Delete)
+		r.Patch("/api/tickets/{id}/assign", ticketsH.Assign)
+		r.Get("/api/tickets/{id}/comments", ticketsH.ListComments)
+		r.Post("/api/tickets/{id}/comments", ticketsH.AddComment)
+
+		// Tasks — read/status-change endpoints are all roles, scoped
+		// server-side (see TasksHandler.List / canAccessTask). Create/Update/
+		// Delete/AssignableUsers are SuperAdmin + TenantAdmin only — they're
+		// the only roles that assign work.
+		r.Get("/api/tasks", tasksH.List)
+		r.Get("/api/tasks/{id}", tasksH.Get)
+		r.Patch("/api/tasks/{id}/status", tasksH.UpdateStatus)
+		r.Get("/api/tasks/notifications", tasksH.ListNotifications)
+		r.Patch("/api/tasks/notifications/{id}/read", tasksH.MarkNotificationRead)
+		r.Patch("/api/tasks/notifications/read-all", tasksH.MarkAllNotificationsRead)
+
+		r.Group(func(r chi.Router) {
+			r.Use(mw.RequireRole(1))
+			r.Post("/api/tasks", tasksH.Create)
+			r.Put("/api/tasks/{id}", tasksH.Update)
+			r.Delete("/api/tasks/{id}", tasksH.Delete)
+			r.Get("/api/tasks/assignable-users", tasksH.AssignableUsers)
+		})
 
 		// CDR list — all authenticated users (operators see only their calls)
 		r.Get("/api/cdr", cdrH.List)
@@ -245,13 +329,13 @@ func main() {
 		// CDR detail + Monitor — SuperAdmin + TenantAdmin + Supervisor
 		r.Group(func(r chi.Router) {
 			r.Use(mw.RequireRole(2))
-			r.Get("/api/cdr/{id}",           cdrH.Get)
-			r.Get("/api/cdr/{id}/audio",     cdrH.Audio)
-			r.Get("/api/monitor/snapshot",   monitorH.Snapshot)
-			r.Get("/api/agents/info",        monitorH.AgentsInfo)
-			r.Post("/api/actions/pause",     monitorH.Pause)
-			r.Post("/api/actions/unpause",   monitorH.Unpause)
-			r.Post("/api/actions/hangup",    monitorH.Hangup)
+			r.Get("/api/cdr/{id}", cdrH.Get)
+			r.Get("/api/cdr/{id}/audio", cdrH.Audio)
+			r.Get("/api/monitor/snapshot", monitorH.Snapshot)
+			r.Get("/api/agents/info", monitorH.AgentsInfo)
+			r.Post("/api/actions/pause", monitorH.Pause)
+			r.Post("/api/actions/unpause", monitorH.Unpause)
+			r.Post("/api/actions/hangup", monitorH.Hangup)
 		})
 
 		// Reports — SuperAdmin + TenantAdmin + Supervisor
@@ -263,23 +347,23 @@ func main() {
 		// Blacklist — SuperAdmin + TenantAdmin
 		r.Group(func(r chi.Router) {
 			r.Use(mw.RequireRole(1))
-			r.Get("/api/blacklist",              blacklistH.List)
-			r.Post("/api/blacklist",             blacklistH.Create)
-			r.Put("/api/blacklist/{id}",         blacklistH.Update)
-			r.Delete("/api/blacklist/{id}",      blacklistH.Delete)
+			r.Get("/api/blacklist", blacklistH.List)
+			r.Post("/api/blacklist", blacklistH.Create)
+			r.Put("/api/blacklist/{id}", blacklistH.Update)
+			r.Delete("/api/blacklist/{id}", blacklistH.Delete)
 			r.Patch("/api/blacklist/{id}/toggle", blacklistH.Toggle)
-			r.Get("/api/blacklist/check",        blacklistH.Check)
+			r.Get("/api/blacklist/check", blacklistH.Check)
 		})
 
 		// Whitelist — SuperAdmin + TenantAdmin
 		r.Group(func(r chi.Router) {
 			r.Use(mw.RequireRole(1))
-			r.Get("/api/whitelist",              whitelistH.List)
-			r.Post("/api/whitelist",             whitelistH.Create)
-			r.Put("/api/whitelist/{id}",         whitelistH.Update)
-			r.Delete("/api/whitelist/{id}",      whitelistH.Delete)
+			r.Get("/api/whitelist", whitelistH.List)
+			r.Post("/api/whitelist", whitelistH.Create)
+			r.Put("/api/whitelist/{id}", whitelistH.Update)
+			r.Delete("/api/whitelist/{id}", whitelistH.Delete)
 			r.Patch("/api/whitelist/{id}/toggle", whitelistH.Toggle)
-			r.Get("/api/whitelist/check",        whitelistH.Check)
+			r.Get("/api/whitelist/check", whitelistH.Check)
 		})
 
 		// KC numbers overview — SuperAdmin + TenantAdmin + Supervisor (own tenant only)
@@ -291,31 +375,33 @@ func main() {
 		// IVR — greeting/menu/queue-settings: SuperAdmin + TenantAdmin only
 		r.Group(func(r chi.Router) {
 			r.Use(mw.RequireRole(1))
-			r.Get("/api/kc-numbers/{id}/ivr",                    ivrH.GetConfig)
-			r.Put("/api/kc-numbers/{id}/ivr",                    ivrH.UpdateConfig)
-			r.Post("/api/kc-numbers/{id}/ivr/greeting",          ivrH.UploadGreeting)
-			r.Post("/api/kc-numbers/{id}/ivr/sync",              ivrH.Sync)
-			r.Get("/api/kc-numbers/{id}/ivr/options",            ivrH.ListOptions)
-			r.Post("/api/kc-numbers/{id}/ivr/options",           ivrH.SaveOption)
+			r.Get("/api/kc-numbers/{id}/ivr", ivrH.GetConfig)
+			r.Put("/api/kc-numbers/{id}/ivr", ivrH.UpdateConfig)
+			r.Post("/api/kc-numbers/{id}/ivr/greeting", ivrH.UploadGreeting)
+			r.Post("/api/kc-numbers/{id}/ivr/closed-greeting", ivrH.UploadClosedGreeting)
+			r.Post("/api/kc-numbers/{id}/ivr/moh", ivrH.UploadMOH)
+			r.Post("/api/kc-numbers/{id}/ivr/sync", ivrH.Sync)
+			r.Get("/api/kc-numbers/{id}/ivr/options", ivrH.ListOptions)
+			r.Post("/api/kc-numbers/{id}/ivr/options", ivrH.SaveOption)
 			r.Delete("/api/kc-numbers/{id}/ivr/options/{digit}", ivrH.DeleteOption)
 		})
 
 		// IVR — operators: SuperAdmin + TenantAdmin + Supervisor
 		r.Group(func(r chi.Router) {
 			r.Use(mw.RequireRole(2))
-			r.Get("/api/kc-numbers/{id}/ivr/members",               ivrH.ListMembers)
-			r.Post("/api/kc-numbers/{id}/ivr/members",              ivrH.AddMember)
+			r.Get("/api/kc-numbers/{id}/ivr/members", ivrH.ListMembers)
+			r.Post("/api/kc-numbers/{id}/ivr/members", ivrH.AddMember)
 			r.Delete("/api/kc-numbers/{id}/ivr/members/{username}", ivrH.RemoveMember)
-			r.Get("/api/kc-numbers/{id}/ivr/available-users",       ivrH.GetAvailableUsers)
+			r.Get("/api/kc-numbers/{id}/ivr/available-users", ivrH.GetAvailableUsers)
 		})
 
-		r.Get("/api/phone/config",        phoneH.Config)
-		r.Get("/api/phone/active-call",   phoneH.ActiveCall)
-		r.Post("/api/phone/hangup",       phoneH.Hangup)
-		r.Post("/api/phone/resume-call",  phoneH.ResumeCall)
+		r.Get("/api/phone/config", phoneH.Config)
+		r.Get("/api/phone/active-call", phoneH.ActiveCall)
+		r.Post("/api/phone/hangup", phoneH.Hangup)
+		r.Post("/api/phone/resume-call", phoneH.ResumeCall)
 		r.Post("/api/phone/hangup-intent", phoneH.HangupIntent)
-		r.Get("/ws/monitor",       monitorH.ServeWS)
-		r.Get("/ws/phone",         phoneH.ServeWS)
+		r.Get("/ws/monitor", monitorH.ServeWS)
+		r.Get("/ws/phone", phoneH.ServeWS)
 	})
 
 	if _, err := os.Stat(cfg.StaticDir); err == nil {

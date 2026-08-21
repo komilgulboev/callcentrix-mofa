@@ -20,10 +20,11 @@ import (
 // tenant_id=NULL — SuperAdmin later assigns them to a tenant from the
 // existing "Назначение" (TenantUsers) page, same as any unassigned user.
 type RegistrationHandler struct {
-	DB           *sql.DB
-	JWTSecret    string
-	JWTMinutes   int
-	SIPTransport string
+	DB                 *sql.DB
+	JWTSecret          string
+	JWTMinutes         int
+	JWTOperatorMinutes int
+	SIPTransport       string
 }
 
 // generateCode returns a random 6-digit numeric code.
@@ -160,7 +161,8 @@ func (h *RegistrationHandler) VerifyCode(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	token, err := jwt.Generate(h.JWTSecret, h.JWTMinutes, id, body.Username, tenantID, userType, role)
+	ttl := jwtTTLFor(userType, h.JWTMinutes, h.JWTOperatorMinutes)
+	token, err := jwt.Generate(h.JWTSecret, ttl, id, body.Username, tenantID, userType, role)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "token error")
 		return

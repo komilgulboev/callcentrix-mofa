@@ -13,7 +13,7 @@ import { users as usersApi } from 'src/api'
 import useAuthStore from 'src/store/auth'
 
 const ROLE_COLORS = ['danger', 'primary', 'warning', 'info']
-const EMPTY = { username: '', password: '', userType: '3', sipNo: '', firstName: '', lastName: '' }
+const EMPTY = { username: '', password: '', userType: '3', sipNo: '', firstName: '', lastName: '', telegramChatId: '' }
 
 export default function Users() {
   const { t } = useTranslation()
@@ -47,6 +47,7 @@ export default function Users() {
       sipNo: u.sipNo ?? '',
       firstName: u.firstName ?? '',
       lastName:  u.lastName ?? '',
+      telegramChatId: u.telegramChatId ?? '',
     })
     setModal(true)
   }
@@ -256,6 +257,13 @@ export default function Users() {
                   <option key={r.value} value={r.value}>{r.label}</option>
                 ))}
               </CFormSelect>
+            </div>
+            <div>
+              <CFormLabel>{t('users.telegram_chat_id_label')}</CFormLabel>
+              <CFormInput value={form.telegramChatId}
+                onChange={(e) => setForm({ ...form, telegramChatId: e.target.value })}
+                placeholder="123456789" />
+              <div className="form-text">{t('users.telegram_chat_id_hint')}</div>
             </div>
           </CForm>
         </CModalBody>

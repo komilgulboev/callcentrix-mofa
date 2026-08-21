@@ -2,10 +2,15 @@ import React from 'react'
 import { AppContent, AppFooter, AppHeader, AppSidebar } from 'src/components'
 import PhoneWidget from 'src/components/phone/PhoneWidget'
 import { usePhoneInit } from 'src/hooks/usePhoneInit'
+import useSessionExpiry from 'src/hooks/useSessionExpiry'
 
 export default function DefaultLayout() {
   // Initialize JsSIP once for the whole app session
   usePhoneInit()
+
+  // Auto-logout as soon as the JWT expires, without waiting for the next
+  // navigation or API call to reveal it via a 401.
+  useSessionExpiry()
 
   return (
     <div>

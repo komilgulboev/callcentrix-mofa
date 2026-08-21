@@ -338,9 +338,14 @@ function KCNumbersTab({ tenantsList }) {
     if (!newNumber.trim() || !newProviderId) return
     setSaving(true); setError('')
     try {
-      await kcNumbersApi.create(tenantId, newNumber.trim(), parseInt(newProviderId))
+      const { id } = await kcNumbersApi.create(tenantId, newNumber.trim(), parseInt(newProviderId))
+      const provider = providersList.find(p => String(p.id) === newProviderId)
+      // Straight into the editor — a freshly created number has no greeting/
+      // menu/queue yet, so leaving the admin on the bare list (where they'd
+      // have to remember to come back and click "Configure") is how numbers
+      // end up going live with just the default "beep" and an empty queue.
+      setSelected({ id, number: newNumber.trim(), providerName: provider?.name || '' })
       setNewNumber('')
-      load()
     } catch (e) { setError(e.message) }
     finally { setSaving(false) }
   }

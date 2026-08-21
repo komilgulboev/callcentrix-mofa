@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react'
 import {
-  CCard, CCardBody, CCardHeader, CCardTitle, CCol, CRow, CSpinner, CBadge,
+  CCard, CCardBody, CCardHeader, CCol, CRow, CSpinner, CBadge,
   CButton, CTable, CTableBody, CTableDataCell, CTableHead, CTableHeaderCell, CTableRow,
 } from '@coreui/react'
 import CIcon from '@coreui/icons-react'
@@ -9,6 +9,7 @@ import { useTranslation } from 'react-i18next'
 import { tickets, cdr, monitor as monitorApi, providers as providersApi } from 'src/api'
 import useAuthStore from 'src/store/auth'
 import { statusBadge, PROVIDER_STATUS_POLL_MS } from 'src/utils/providerStatus'
+import TasksBoard from './TasksBoard'
 
 const MONITOR_POLL_MS = 3000
 
@@ -24,21 +25,21 @@ function ProvidersStatusCard() {
   }, [])
 
   return (
-    <CCard>
-      <CCardBody>
-        <CCardTitle>{t('dashboard.providers_status')}</CCardTitle>
+    <CCard className="h-100">
+      <CCardBody className="py-2">
+        <div className="text-muted small fw-semibold mb-1">{t('dashboard.providers_status')}</div>
         {providersList === null ? (
-          <div className="text-center py-3"><CSpinner size="sm" /></div>
+          <div className="text-center py-1"><CSpinner size="sm" /></div>
         ) : !providersList.length ? (
-          <div className="text-muted small mt-2">{t('dashboard.no_providers')}</div>
+          <div className="text-muted small">{t('dashboard.no_providers')}</div>
         ) : (
-          <div className="d-flex flex-column gap-2 mt-2">
+          <div className="d-flex flex-column gap-1" style={{ fontSize: '0.8rem', maxHeight: 90, overflowY: 'auto' }}>
             {providersList.map(p => {
               const badge = statusBadge(p.status)
               return (
                 <div key={p.id} className="d-flex justify-content-between align-items-center">
-                  <span>{p.name} <span className="text-muted small">({p.host}:{p.port})</span></span>
-                  {badge ? <CBadge color={badge.color}>{badge.label}</CBadge> : <span className="text-muted small">—</span>}
+                  <span>{p.name} <span className="text-muted">({p.host}:{p.port})</span></span>
+                  {badge ? <CBadge color={badge.color} style={{ fontSize: '0.65rem' }}>{badge.label}</CBadge> : <span className="text-muted">—</span>}
                 </div>
               )
             })}
@@ -51,14 +52,14 @@ function ProvidersStatusCard() {
 
 function StatCard({ title, value, color, icon }) {
   return (
-    <CCard className={`border-top border-top-${color} border-top-3`}>
-      <CCardBody>
+    <CCard className={`border-top border-top-${color} border-top-3 h-100`}>
+      <CCardBody className="py-2">
         <div className="d-flex align-items-center justify-content-between">
           <div>
-            <div className="fs-2 fw-bold">{value ?? <CSpinner size="sm" />}</div>
+            <div className="fs-4 fw-bold">{value ?? <CSpinner size="sm" />}</div>
             <div className="text-muted small">{title}</div>
           </div>
-          <div className={`fs-1 text-${color} opacity-25`}>{icon}</div>
+          <div className={`fs-2 text-${color} opacity-25`}>{icon}</div>
         </div>
       </CCardBody>
     </CCard>
@@ -303,6 +304,29 @@ export default function Dashboard() {
       </CRow>
 
       <CRow className="g-3 mt-1">
+        <CCol xl={isSuperAdmin() ? 6 : 12}>
+          <CCard className="h-100">
+            <CCardBody className="py-2">
+              <div className="text-muted small fw-semibold mb-1">{t('dashboard.todays_calls')}</div>
+              <div className="d-flex align-items-baseline gap-2">
+                <div className="fs-5 fw-bold">{todayCalls ?? <CSpinner size="sm" />}</div>
+                <div className="text-muted small">{t('dashboard.total_calls_today')}</div>
+              </div>
+              <div className="d-flex gap-3 small mt-1">
+                <span>{t('cdr.disposition_answered')}: <strong>{todayAnswered ?? '—'}</strong></span>
+                <span>{t('phone.missed')}: <strong>{todayMissed ?? '—'}</strong></span>
+              </div>
+            </CCardBody>
+          </CCard>
+        </CCol>
+        {isSuperAdmin() && (
+          <CCol xl={6}>
+            <ProvidersStatusCard />
+          </CCol>
+        )}
+      </CRow>
+
+      <CRow className="g-3 mt-1">
         <CCol xl={12}>
           <AgentsCard
             loading={loading} agents={agents} canManage={canManage}
@@ -318,24 +342,9 @@ export default function Dashboard() {
       </CRow>
 
       <CRow className="g-3 mt-1">
-        <CCol xl={isSuperAdmin() ? 6 : 12}>
-          <CCard>
-            <CCardBody>
-              <CCardTitle>{t('dashboard.todays_calls')}</CCardTitle>
-              <div className="fs-3 fw-bold">{todayCalls ?? <CSpinner size="sm" />}</div>
-              <div className="text-muted small mb-2">{t('dashboard.total_calls_today')}</div>
-              <div className="d-flex gap-3 small">
-                <span>{t('cdr.disposition_answered')}: <strong>{todayAnswered ?? '—'}</strong></span>
-                <span>{t('phone.missed')}: <strong>{todayMissed ?? '—'}</strong></span>
-              </div>
-            </CCardBody>
-          </CCard>
+        <CCol xl={12}>
+          <TasksBoard />
         </CCol>
-        {isSuperAdmin() && (
-          <CCol xl={6}>
-            <ProvidersStatusCard />
-          </CCol>
-        )}
       </CRow>
     </div>
   )

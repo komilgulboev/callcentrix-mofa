@@ -1,6 +1,7 @@
 package ami
 
 import (
+	"database/sql"
 	"log"
 	"strconv"
 	"strings"
@@ -94,6 +95,8 @@ type Monitor struct {
 	channelBridge    map[string]string          // channel -> BridgeUniqueid it's currently in
 	pendingReconnect map[string]pendingReconnect // agent ext -> caller channel waiting to be picked back up
 	deliberateIntent map[string]time.Time        // agent ext -> best-effort "next hangup is deliberate" flag expiry
+
+	db *sql.DB // set via SetDB — persists call_outcomes, see recordAgentConnected
 }
 
 func NewMonitor() *Monitor {
@@ -121,6 +124,64 @@ func (m *Monitor) Attach(client *Client) {
 	m.clients = append(m.clients, client)
 	m.mu.Unlock()
 	client.OnEvent(func(e Event) { m.handleEvent(client, e) })
+}
+
+// SetDB wires up the database used to persist call outcomes (see
+// recordAgentConnected) — separate from NewMonitor because the CDR database
+// isn't resolved until after this Monitor and its AMI clients already exist
+// (see cmd/server/main.go). May be a different physical database than the
+// main app DB (cfg.CDRDSN) — callers should pass whichever one CDRHandler
+// itself reads from, since recordAgentConnected's rows only matter for the
+// LEFT JOIN CDRHandler.List does against ast_cdr.
+func (m *Monitor) SetDB(db *sql.DB) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.db = db
+}
+
+// EnsureCallOutcomesTable creates call_outcomes if it doesn't already exist.
+// Must be called against the same database CDRHandler queries (see SetDB) —
+// the main app's migration.sql only ever runs against the main app
+// database, which may not be where ast_cdr (and now this table) actually
+// live. Safe to call on every startup.
+func EnsureCallOutcomesTable(db *sql.DB) error {
+	if _, err := db.Exec(`
+		CREATE TABLE IF NOT EXISTS call_outcomes (
+			linkedid        VARCHAR(150) PRIMARY KEY,
+			agent_connected BOOLEAN NOT NULL DEFAULT FALSE,
+			agent_username  VARCHAR(100) DEFAULT '',
+			updated_at      TIMESTAMPTZ DEFAULT NOW()
+		)`); err != nil {
+		return err
+	}
+	_, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_call_outcomes_updated ON call_outcomes(updated_at)`)
+	return err
+}
+
+// recordAgentConnected marks a call (grouped by linkedid — the value
+// Asterisk stamps on every channel spawned for one logical call, including
+// an agent's own leg after a Queue()/Dial() bridge) as having actually
+// reached a human agent. This exists because ast_cdr's own `disposition`
+// can't answer that for KC-routed inbound calls: writeKCDialplan Answer()s
+// the caller's channel before Queue() ever runs (needed to play the
+// greeting/IVR/hold music), so disposition='ANSWERED' for nearly every
+// inbound call that reaches the queue, whether or not an agent ever picks
+// up — see CDRHandler.List, which LEFT JOINs this table to work around it.
+// A plain function (not a *Monitor method) taking db explicitly: it's always
+// called via `go`, so it can't safely read m.db itself without racing SetDB
+// — see the BridgeEnter case, which captures db while still holding m.mu.
+// Fire-and-forget: best-effort, must never block AMI event processing.
+func recordAgentConnected(db *sql.DB, linkedID, agentUsername string) {
+	if db == nil || linkedID == "" {
+		return
+	}
+	if _, err := db.Exec(`
+		INSERT INTO call_outcomes (linkedid, agent_connected, agent_username, updated_at)
+		VALUES ($1, TRUE, $2, NOW())
+		ON CONFLICT (linkedid) DO UPDATE SET agent_connected=TRUE, agent_username=$2, updated_at=NOW()`,
+		linkedID, agentUsername); err != nil {
+		log.Printf("[Monitor] record call outcome for %s: %v", linkedID, err)
+	}
 }
 
 // ClientForAgent returns the AMI client for the Asterisk box an agent
@@ -358,6 +419,16 @@ func (m *Monitor) handleEvent(client *Client, e Event) {
 			a := m.getOrCreateAgent(ext)
 			a.Status = "busy"
 			m.setAgent(ext, a, client)
+
+			linkedID := e["Linkedid"]
+			if linkedID == "" {
+				linkedID = e["Uniqueid"]
+			}
+			// Capture db while still holding m.mu — recordAgentConnected runs
+			// in its own goroutine (must never block AMI event processing on
+			// a DB write), so it can't safely read m.db itself once unlocked.
+			db := m.db
+			go recordAgentConnected(db, linkedID, ext)
 		}
 
 	case "BridgeLeave":

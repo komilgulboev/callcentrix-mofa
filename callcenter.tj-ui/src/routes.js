@@ -9,6 +9,10 @@ const CDR          = React.lazy(() => import('src/views/cdr/CDR'))
 const Tickets      = React.lazy(() => import('src/views/tickets/Tickets'))
 const TicketDetail = React.lazy(() => import('src/views/tickets/TicketDetail'))
 const Topics       = React.lazy(() => import('src/views/topics/Topics'))
+const KnowledgeBase         = React.lazy(() => import('src/views/knowledgebase/KnowledgeBase'))
+const KnowledgeBaseCategory = React.lazy(() => import('src/views/knowledgebase/KnowledgeBaseCategory'))
+const KnowledgeBaseArticle  = React.lazy(() => import('src/views/knowledgebase/KnowledgeBaseArticle'))
+const KnowledgeBaseEditor   = React.lazy(() => import('src/views/knowledgebase/KnowledgeBaseEditor'))
 const IVR          = React.lazy(() => import('src/views/ivr/IVR'))
 const Blacklist    = React.lazy(() => import('src/views/blacklist/Blacklist'))
 const Whitelist    = React.lazy(() => import('src/views/whitelist/Whitelist'))
@@ -27,11 +31,16 @@ const routes = [
   { path: '/tickets',      name: 'Tickets',      element: Tickets },
   { path: '/tickets/:id',  name: 'Ticket',       element: TicketDetail },
   { path: '/topics',       name: 'Topics',       element: Topics,      roles: [0, 1] },
+  { path: '/knowledge-base',                  name: 'KnowledgeBase',         element: KnowledgeBase },
+  { path: '/knowledge-base/new',              name: 'KnowledgeBaseNew',      element: KnowledgeBaseEditor,  roles: [1] },
+  { path: '/knowledge-base/category/:id',     name: 'KnowledgeBaseCategory', element: KnowledgeBaseCategory },
+  { path: '/knowledge-base/article/:id',      name: 'KnowledgeBaseArticle',  element: KnowledgeBaseArticle },
+  { path: '/knowledge-base/article/:id/edit', name: 'KnowledgeBaseEdit',     element: KnowledgeBaseEditor,  roles: [1] },
   { path: '/ivr',          name: 'IVR',          element: IVR,         roles: [0, 1, 2] },
   { path: '/blacklist',    name: 'Blacklist',    element: Blacklist,   roles: [0, 1] },
   { path: '/whitelist',    name: 'Whitelist',    element: Whitelist,   roles: [0, 1] },
   { path: '/reports/tickets', name: 'Tickets Report', element: TicketsReport, roles: [0, 1, 2] },
-  { path: '/settings',     name: 'Settings',     element: Settings,    roles: [0, 1] },
+  { path: '/settings',     name: 'Settings',     element: Settings }, // без roles — для всех
 ]
 
 export default routes

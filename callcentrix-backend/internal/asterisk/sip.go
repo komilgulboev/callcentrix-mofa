@@ -114,7 +114,12 @@ func UpdateSIPContext(db *sql.DB, username, context string) error {
 // Context "tenant-{N}" routes:
 //   _X.  → Dial(PJSIP/${EXTEN},30,rU)     — internal: agent ↔ agent by username
 //   i    → Hangup                           — invalid extension
-//   h    → Hangup                           — hangup handler
+//   h    → NoOp                             — hangup handler; deliberately a
+//          no-op, not Hangup() — the channel is already tearing down by the
+//          time 'h' runs, and an explicit Hangup() there was spawning a
+//          spurious zero-duration CDR row (dst='h') alongside the real call's
+//          own CDR. See migration.sql for the backfill that fixes already-
+//          written 'h' rows for existing tenants.
 //   _9X. → Set(CALLERID)+Dial(...@provider) — outbound: dial 9 for an outside
 //          line, only written when tenants.outbound_provider_id is set
 func CreateTenantContext(db *sql.DB, tenantID int) error {
@@ -137,7 +142,7 @@ func CreateTenantContext(db *sql.DB, tenantID int) error {
 	entries := []row{
 		{"_X.", 1, "Dial", "PJSIP/${EXTEN},30,rU"},
 		{"i", 1, "Hangup", ""},
-		{"h", 1, "Hangup", ""},
+		{"h", 1, "NoOp", ""},
 	}
 
 	tx, err := db.Begin()
@@ -147,25 +152,31 @@ func CreateTenantContext(db *sql.DB, tenantID int) error {
 	defer tx.Rollback()
 
 	for _, e := range entries {
-		// Delete first to avoid unique constraint issues on ast_extensions
-		_, _ = tx.Exec(`DELETE FROM ast_extensions WHERE context=$1 AND exten=$2 AND priority=$3`,
-			ctx, e.exten, e.priority)
-		_, err := tx.Exec(`
+		// Upsert rather than delete-then-insert: this now runs for every
+		// tenant on every startup (see ResyncAllTenantContexts below), so two
+		// overlapping backend instances (a restart racing an old process
+		// still shutting down, say) could otherwise interleave — one's
+		// INSERT landing between another's DELETE and its own INSERT — and
+		// trip ast_extensions' (context,exten,priority) unique constraint.
+		// A single ON CONFLICT statement is atomic, so that race can't happen.
+		if _, err := tx.Exec(`
 			INSERT INTO ast_extensions (context, exten, priority, app, appdata)
-			VALUES ($1,$2,$3,$4,$5)`,
-			ctx, e.exten, e.priority, e.app, e.appdata)
-		if err != nil {
-			return fmt.Errorf("insert exten %s: %w", e.exten, err)
+			VALUES ($1,$2,$3,$4,$5)
+			ON CONFLICT (context, exten, priority) DO UPDATE SET app=EXCLUDED.app, appdata=EXCLUDED.appdata`,
+			ctx, e.exten, e.priority, e.app, e.appdata); err != nil {
+			return fmt.Errorf("upsert exten %s: %w", e.exten, err)
 		}
 	}
 
-	// Outbound "dial 9 for an outside line" rule. Cleared first regardless,
-	// so unassigning a tenant's outbound trunk cleanly removes the ability
-	// to dial out; rewritten below only if a trunk is currently assigned.
-	if _, err := tx.Exec(`DELETE FROM ast_extensions WHERE context=$1 AND exten='_9X.'`, ctx); err != nil {
-		return fmt.Errorf("clear outbound rule: %w", err)
-	}
-	if outboundProviderID.Valid {
+	// Outbound "dial 9 for an outside line" rule.
+	if !outboundProviderID.Valid {
+		// No trunk assigned — remove any existing outbound rule entirely
+		// (this is a real deletion, not paired with a same-key insert, so
+		// it doesn't have the race the upserts above guard against).
+		if _, err := tx.Exec(`DELETE FROM ast_extensions WHERE context=$1 AND exten='_9X.'`, ctx); err != nil {
+			return fmt.Errorf("clear outbound rule: %w", err)
+		}
+	} else {
 		callerIDStep := row{"_9X.", 1, "NoOp", ""}
 		if outboundCallerID != "" {
 			callerIDStep = row{"_9X.", 1, "Set", "CALLERID(num)=" + outboundCallerID}
@@ -178,9 +189,10 @@ func CreateTenantContext(db *sql.DB, tenantID int) error {
 		for _, e := range outboundEntries {
 			if _, err := tx.Exec(`
 				INSERT INTO ast_extensions (context, exten, priority, app, appdata)
-				VALUES ($1,$2,$3,$4,$5)`,
+				VALUES ($1,$2,$3,$4,$5)
+				ON CONFLICT (context, exten, priority) DO UPDATE SET app=EXCLUDED.app, appdata=EXCLUDED.appdata`,
 				ctx, e.exten, e.priority, e.app, e.appdata); err != nil {
-				return fmt.Errorf("insert outbound exten: %w", err)
+				return fmt.Errorf("upsert outbound exten: %w", err)
 			}
 		}
 	}
@@ -189,6 +201,42 @@ func CreateTenantContext(db *sql.DB, tenantID int) error {
 		return fmt.Errorf("commit: %w", err)
 	}
 	log.Printf("[Asterisk] Dialplan context created: %s", ctx)
+	return nil
+}
+
+// ResyncAllTenantContexts rewrites every tenant's dialplan context from its
+// current tenants row. CreateTenantContext is otherwise only invoked from
+// TenantsHandler's Create/Update/AssignUser (internal/handlers/tenants.go),
+// so a tenant whose ast_extensions rows predate this codebase — or were
+// written out-of-band some other way — never gets those stale rows replaced
+// until an admin happens to touch that tenant's settings. This is exactly
+// how a tenant's _9X. rule can end up keeping a stray extra Dial() priority
+// (e.g. dialing the raw, unstripped number before falling through to the
+// correct Dial(PJSIP/${EXTEN:1}@...) below it) that no version of
+// CreateTenantContext has ever produced. Meant to run once at startup (see
+// cmd/server/main.go) — idempotent (CreateTenantContext DELETEs+rewrites
+// each context), safe on every restart. Best-effort per tenant: one bad
+// tenant shouldn't block the rest from getting resynced.
+func ResyncAllTenantContexts(db *sql.DB) error {
+	rows, err := db.Query(`SELECT id FROM tenants`)
+	if err != nil {
+		return fmt.Errorf("list tenants: %w", err)
+	}
+	var ids []int
+	for rows.Next() {
+		var id int
+		if err := rows.Scan(&id); err != nil {
+			continue
+		}
+		ids = append(ids, id)
+	}
+	rows.Close()
+
+	for _, id := range ids {
+		if err := CreateTenantContext(db, id); err != nil {
+			log.Printf("[Asterisk] resync tenant %d context: %v", id, err)
+		}
+	}
 	return nil
 }
 

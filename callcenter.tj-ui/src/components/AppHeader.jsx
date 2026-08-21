@@ -10,12 +10,13 @@ import { cilMenu, cilAccountLogout, cilSettings, cilLanguage } from '@coreui/ico
 import { useTranslation } from 'react-i18next'
 import useUIStore from 'src/store/ui'
 import useAuthStore from 'src/store/auth'
+import TaskNotificationBell from 'src/components/TaskNotificationBell'
 
 const LANGS = ['ru', 'tj', 'en']
 
 export default function AppHeader() {
   const { sidebarOpen, toggleSidebar } = useUIStore()
-  const { user, logout } = useAuthStore()
+  const { user, logout, isSuperAdmin, isTenantAdmin } = useAuthStore()
   const navigate = useNavigate()
   const { t, i18n } = useTranslation()
 
@@ -42,6 +43,8 @@ export default function AppHeader() {
         </CHeaderToggler>
 
         <CHeaderNav className="ms-auto">
+          <TaskNotificationBell enabled={isSuperAdmin() || isTenantAdmin()} />
+
           <CNavItem className="d-flex align-items-center me-3">
             <span className={`badge bg-${roleColor}`}>{roleLabel}</span>
           </CNavItem>

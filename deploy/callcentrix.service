@@ -1,0 +1,16 @@
+[Unit]
+Description=CallCentrix backend
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/komil/cc_hosting_version
+ExecStart=/home/komil/cc_hosting_version/callcentrix-linux
+Restart=on-failure
+RestartSec=3
+User=komil
+# Uncomment to cap memory/CPU if the box is shared with other services:
+# MemoryMax=1G
+
+[Install]
+WantedBy=multi-user.target

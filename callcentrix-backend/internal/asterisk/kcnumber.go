@@ -499,6 +499,9 @@ func DeleteKCNumber(db *sql.DB, tenantID, kcNumberID int) error {
 	if _, err := tx.Exec(`DELETE FROM ivr_configs WHERE kc_number_id=$1`, kcNumberID); err != nil {
 		return fmt.Errorf("delete ivr config: %w", err)
 	}
+	if _, err := tx.Exec(`DELETE FROM ast_musiconhold WHERE name=$1`, MOHClassName(kcNumberID)); err != nil {
+		return fmt.Errorf("delete moh class: %w", err)
+	}
 	if _, err := tx.Exec(`DELETE FROM kc_numbers WHERE id=$1`, kcNumberID); err != nil {
 		return fmt.Errorf("delete kc number: %w", err)
 	}
@@ -548,7 +551,12 @@ func ListKCNumbers(db *sql.DB, tenantID int) ([]KCNumber, error) {
 }
 
 // UpsertKCQueue creates or updates the Asterisk queue backing a KC number.
-func UpsertKCQueue(db *sql.DB, kcNumberID int, strategy string, timeout, maxLen int) error {
+// mohClass is the hold-music class name to apply (an empty string falls back
+// to Asterisk's built-in "default" class) — the actual audio files for a
+// non-default class must already exist on the Asterisk server's own
+// filesystem (e.g. /var/lib/asterisk/moh/<class>/), same as musiconhold.conf
+// normally requires; this only wires the class *name* through to the queue.
+func UpsertKCQueue(db *sql.DB, kcNumberID int, strategy string, timeout, maxLen int, mohClass string) error {
 	name := KCQueueName(kcNumberID)
 	if strategy == "" {
 		strategy = "ringall"
@@ -556,9 +564,12 @@ func UpsertKCQueue(db *sql.DB, kcNumberID int, strategy string, timeout, maxLen 
 	if timeout == 0 {
 		timeout = 15
 	}
+	if mohClass == "" {
+		mohClass = "default"
+	}
 	res, err := db.Exec(`
-		UPDATE ast_queues SET strategy=$1, timeout=$2, maxlen=$3
-		WHERE name=$4`, strategy, timeout, maxLen, name)
+		UPDATE ast_queues SET strategy=$1, timeout=$2, maxlen=$3, musiconhold=$4
+		WHERE name=$5`, strategy, timeout, maxLen, mohClass, name)
 	if err != nil {
 		return fmt.Errorf("update queue %s: %w", name, err)
 	}
@@ -566,13 +577,42 @@ func UpsertKCQueue(db *sql.DB, kcNumberID int, strategy string, timeout, maxLen 
 		_, err = db.Exec(`
 			INSERT INTO ast_queues
 				(name, strategy, timeout, maxlen, ringinuse, joinempty, leavewhenempty, musiconhold, retry, wrapuptime)
-			VALUES ($1,$2,$3,$4,'no','yes','no','default',5,0)`,
-			name, strategy, timeout, maxLen)
+			VALUES ($1,$2,$3,$4,'no','yes','no',$5,5,0)`,
+			name, strategy, timeout, maxLen, mohClass)
 		if err != nil {
 			return fmt.Errorf("insert queue %s: %w", name, err)
 		}
 	}
-	log.Printf("[Asterisk] KC queue upserted: %s (strategy=%s)", name, strategy)
+	log.Printf("[Asterisk] KC queue upserted: %s (strategy=%s, moh=%s)", name, strategy, mohClass)
+	return nil
+}
+
+// MOHClassName returns the dedicated realtime MOH class name for a KC
+// number's uploaded hold-music file — distinct from any manually-typed,
+// pre-existing class name an admin might reference in ivr_configs.moh_class
+// instead (see IVRHandler.UploadMOH).
+func MOHClassName(kcNumberID int) string {
+	return fmt.Sprintf("kc-%d", kcNumberID)
+}
+
+// UpsertMOHClass creates or updates a realtime Music-On-Hold class backed by
+// files under `directory` (mode=files) — requires realtime MOH to be
+// configured on the Asterisk server itself; see the comment on
+// ast_musiconhold in migration.sql for the one-time manual step that
+// requires, and IVRHandler.UploadMOH for how this gets called.
+func UpsertMOHClass(db *sql.DB, name, directory string) error {
+	res, err := db.Exec(`UPDATE ast_musiconhold SET directory=$1, mode='files' WHERE name=$2`, directory, name)
+	if err != nil {
+		return fmt.Errorf("update moh class %s: %w", name, err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		if _, err := db.Exec(`
+			INSERT INTO ast_musiconhold (name, mode, directory, sort)
+			VALUES ($1,'files',$2,'random')`, name, directory); err != nil {
+			return fmt.Errorf("insert moh class %s: %w", name, err)
+		}
+	}
+	log.Printf("[Asterisk] MOH class upserted: %s (dir=%s)", name, directory)
 	return nil
 }
 

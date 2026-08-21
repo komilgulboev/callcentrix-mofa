@@ -71,3 +71,12 @@
 }
 
 .cursor-pointer { cursor: pointer; }
+
+// Knowledge base article body (rich-text HTML, see KnowledgeBaseArticle) —
+// Quill doesn't constrain inserted <img> to the editor's own width, so a
+// full-resolution photo would otherwise overflow the card.
+.kb-article-body img {
+  max-width: 100%;
+  height: auto;
+  border-radius: 6px;
+}

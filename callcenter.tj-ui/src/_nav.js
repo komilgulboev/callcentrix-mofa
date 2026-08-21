@@ -13,6 +13,7 @@ import {
   cilShieldAlt,
   cilLockLocked,
   cilChart,
+  cilBook,
 } from '@coreui/icons'
 
 const navigation = [
@@ -30,10 +31,11 @@ const navigation = [
   { component: 'CNavItem',  name: 'nav.webphone',       to: '/webphone',     icon: cilPhone },
   { component: 'CNavItem',  name: 'nav.cdr',            to: '/cdr',          icon: cilList,        roles: [0, 1, 2] },
   { component: 'CNavItem',  name: 'nav.tickets',        to: '/tickets',      icon: cilDescription },
+  { component: 'CNavItem',  name: 'nav.knowledge_base', to: '/knowledge-base', icon: cilBook },
   { component: 'CNavTitle', name: 'nav.reports_group',  roles: [0, 1, 2] },
   { component: 'CNavItem',  name: 'nav.reports_tickets', to: '/reports/tickets', icon: cilChart, roles: [0, 1, 2] },
-  { component: 'CNavTitle', name: 'nav.settings_group', roles: [0, 1] },
-  { component: 'CNavItem',  name: 'nav.settings',       to: '/settings',     icon: cilSettings,    roles: [0, 1] },
+  { component: 'CNavTitle', name: 'nav.settings_group' },
+  { component: 'CNavItem',  name: 'nav.settings',       to: '/settings',     icon: cilSettings },
 ]
 
 export default navigation

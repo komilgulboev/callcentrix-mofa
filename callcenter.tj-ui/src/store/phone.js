@@ -13,11 +13,16 @@ const isInCall = (status) => IN_CALL_STATUSES.includes(status)
 // subnet than the client (see hosted-deployment ICE failures).
 const PC_CONFIG = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] }
 
-// Synthesized ringtone (no bundled audio asset) — two short beeps repeating
-// every 2s while a call is in the 'ringing_in' state.
+// Synthesized tones (no bundled audio asset) — Asterisk doesn't reliably
+// deliver early media (ringback/ringing) to the WebRTC leg in this
+// deployment, so both directions get a locally-generated placeholder sound
+// instead of relying on real RTP arriving before answer. Stopped as soon as
+// a real remote track shows up (see attachRemoteAudio) so it never overlaps
+// genuine audio, and always on confirmed/ended/failed.
 let ringCtx = null
 let ringInterval = null
 
+// Incoming call: two short beeps repeating every 2s.
 function ringtoneBeep() {
   if (!ringCtx) return
   if (ringCtx.state === 'suspended') ringCtx.resume().catch(() => {})
@@ -36,22 +41,57 @@ function ringtoneBeep() {
   })
 }
 
-function startRingtone() {
+// Outgoing call: standard CIS/CEPT ringback cadence (425Hz, 1s on / 4s off).
+function ringbackBeep() {
+  if (!ringCtx) return
+  if (ringCtx.state === 'suspended') ringCtx.resume().catch(() => {})
+  const now = ringCtx.currentTime
+  const osc  = ringCtx.createOscillator()
+  const gain = ringCtx.createGain()
+  osc.type = 'sine'
+  osc.frequency.value = 425
+  gain.gain.setValueAtTime(0.0001, now)
+  gain.gain.exponentialRampToValueAtTime(0.2, now + 0.03)
+  gain.gain.setValueAtTime(0.2, now + 0.95)
+  gain.gain.exponentialRampToValueAtTime(0.0001, now + 1.0)
+  osc.connect(gain).connect(ringCtx.destination)
+  osc.start(now)
+  osc.stop(now + 1.0)
+}
+
+function startTone(beepFn, intervalMs) {
   if (ringInterval) return
   try {
     ringCtx = ringCtx || new (window.AudioContext || window.webkitAudioContext)()
-    ringtoneBeep()
-    ringInterval = setInterval(ringtoneBeep, 2000)
+    beepFn()
+    ringInterval = setInterval(beepFn, intervalMs)
   } catch {}
 }
+
+const startRingtone  = () => startTone(ringtoneBeep, 2000)
+const startRingback  = () => startTone(ringbackBeep, 5000)
 
 function stopRingtone() {
   if (ringInterval) { clearInterval(ringInterval); ringInterval = null }
 }
 
-// Attach the remote track to the shared <audio> element as soon as it arrives.
+// The shared <audio> sink's srcObject is only ever set (attachRemoteAudio),
+// never cleared — if a track had already arrived (real early media, e.g. a
+// carrier's own busy/reorder tone) before the call ends, it would otherwise
+// keep playing indefinitely since nothing ever detaches the stream.
+function stopRemoteAudio() {
+  const audio = document.getElementById('cx-remote-audio')
+  if (!audio) return
+  audio.pause()
+  audio.srcObject = null
+}
+
+// Attach the remote track to the shared <audio> element as soon as it
+// arrives — this also covers genuine early media, so the placeholder tone
+// (if one is playing) is stopped in favor of the real thing.
 function attachRemoteAudio(peerconnection) {
   peerconnection.addEventListener('track', (e) => {
+    stopRingtone()
     const audio = document.getElementById('cx-remote-audio')
     if (!audio || !e.streams?.[0]) return
     audio.srcObject = e.streams[0]
@@ -265,6 +305,19 @@ const usePhoneStore = create(
         const startedAt = Date.now()
         set({ session, status: initialStatus, remoteNumber: remote, channel: null })
         if (initialStatus === 'ringing_in') startRingtone()
+        if (initialStatus === 'ringing_out') startRingback()
+
+        // Safety net for outgoing calls: some trunks never send a proper SIP
+        // final response when the far end declines (observed: no 'failed'/
+        // 'ended' at all, call stuck in 'ringing_out' with the ringback tone
+        // still going — likely an in-band busy/reorder tone from the carrier
+        // instead of a real reject, with Asterisk's own Dial() not timing out
+        // for up to 60s). Give up locally well before that and cancel the
+        // request ourselves so the UI/audio don't hang indefinitely.
+        let ringTimeout = initialStatus === 'ringing_out'
+          ? setTimeout(() => { if (get().session === session) get().hangup() }, 45000)
+          : null
+        const clearRingTimeout = () => { if (ringTimeout) { clearTimeout(ringTimeout); ringTimeout = null } }
 
         // Attach remote audio as soon as track arrives (before confirmed).
         // Covers incoming calls: their peerconnection is created later, on answer(),
@@ -273,6 +326,7 @@ const usePhoneStore = create(
         session.on('peerconnection', ({ peerconnection }) => attachRemoteAudio(peerconnection))
 
         session.on('confirmed', () => {
+          clearRingTimeout()
           stopRingtone()
           const answeredAt = Date.now()
           set({ status: 'active', answeredAt, callDuration: 0, _timer: startDurationTimer(answeredAt, set) })
@@ -296,11 +350,13 @@ const usePhoneStore = create(
         }
 
         session.on('ended',  (e) => {
+          clearRingTimeout()
           stopRingtone()
           addHistory('ended')
           if (get().session === session) get()._resetCall()
         })
         session.on('failed', (e) => {
+          clearRingTimeout()
           stopRingtone()
           console.error('[JsSIP] call failed:', e.cause, e.message)
           addHistory('missed')
@@ -311,6 +367,8 @@ const usePhoneStore = create(
       _resetCall() {
         const { _timer } = get()
         if (_timer) clearInterval(_timer)
+        stopRingtone()
+        stopRemoteAudio()
         set({
           session: null, status: 'registered',
           remoteNumber: '', callDuration: 0,

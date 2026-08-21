@@ -8,9 +8,9 @@ import (
 	"net/http"
 	"strconv"
 
-	"github.com/go-chi/chi/v5"
 	"callcentrix/internal/asterisk"
 	mw "callcentrix/internal/middleware"
+	"github.com/go-chi/chi/v5"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -20,17 +20,18 @@ type UsersHandler struct {
 }
 
 type User struct {
-	ID         int     `json:"id"`
-	TenantID   *int    `json:"tenantId"`
-	Username   string  `json:"username"`
-	FirstName  string  `json:"firstName"`
-	LastName   string  `json:"lastName"`
-	UserType   int     `json:"userType"`
-	Role       int     `json:"role"`
-	SipNo      string  `json:"sipNo"`
-	Active     bool    `json:"active"`
-	CreatedAt  string  `json:"createdAt"`
-	ServerName *string `json:"serverName"` // which Asterisk server this agent is assigned to, if any
+	ID             int     `json:"id"`
+	TenantID       *int    `json:"tenantId"`
+	Username       string  `json:"username"`
+	FirstName      string  `json:"firstName"`
+	LastName       string  `json:"lastName"`
+	UserType       int     `json:"userType"`
+	Role           int     `json:"role"`
+	SipNo          string  `json:"sipNo"`
+	Active         bool    `json:"active"`
+	CreatedAt      string  `json:"createdAt"`
+	ServerName     *string `json:"serverName"` // which Asterisk server this agent is assigned to, if any
+	TelegramChatID string  `json:"telegramChatId"`
 }
 
 func (h *UsersHandler) List(w http.ResponseWriter, r *http.Request) {
@@ -40,23 +41,26 @@ func (h *UsersHandler) List(w http.ResponseWriter, r *http.Request) {
 
 	if c.UserType == 0 {
 		rows, err = h.DB.QueryContext(r.Context(),
-			`SELECT u.id, u.tenant_id, u.username, u.first_name, u.last_name, u.user_type, u.role, u.sip_no, u.active, u.created_at, s.name
+			`SELECT u.id, u.tenant_id, u.username, u.first_name, u.last_name, u.user_type, u.role, u.sip_no, u.active, u.created_at, s.name, u.telegram_chat_id
 			 FROM users u LEFT JOIN asterisk_servers s ON s.id = u.server_id
 			 WHERE u.phone_verified = TRUE ORDER BY u.id`)
 	} else {
 		rows, err = h.DB.QueryContext(r.Context(),
-			`SELECT u.id, u.tenant_id, u.username, u.first_name, u.last_name, u.user_type, u.role, u.sip_no, u.active, u.created_at, s.name
+			`SELECT u.id, u.tenant_id, u.username, u.first_name, u.last_name, u.user_type, u.role, u.sip_no, u.active, u.created_at, s.name, u.telegram_chat_id
 			 FROM users u LEFT JOIN asterisk_servers s ON s.id = u.server_id
 			 WHERE u.tenant_id = $1 AND u.phone_verified = TRUE ORDER BY u.id`, c.TenantID)
 	}
-	if err != nil { writeError(w, http.StatusInternalServerError, err.Error()); return }
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	defer rows.Close()
 
 	result := []User{}
 	for rows.Next() {
 		var u User
 		if err := rows.Scan(&u.ID, &u.TenantID, &u.Username, &u.FirstName, &u.LastName,
-			&u.UserType, &u.Role, &u.SipNo, &u.Active, &u.CreatedAt, &u.ServerName); err != nil {
+			&u.UserType, &u.Role, &u.SipNo, &u.Active, &u.CreatedAt, &u.ServerName, &u.TelegramChatID); err != nil {
 			continue
 		}
 		result = append(result, u)
@@ -68,26 +72,33 @@ func (h *UsersHandler) Get(w http.ResponseWriter, r *http.Request) {
 	id, _ := strconv.Atoi(chi.URLParam(r, "id"))
 	var u User
 	err := h.DB.QueryRowContext(r.Context(),
-		`SELECT id, tenant_id, username, first_name, last_name, user_type, role, sip_no, active, created_at
+		`SELECT id, tenant_id, username, first_name, last_name, user_type, role, sip_no, active, created_at, telegram_chat_id
 		 FROM users WHERE id = $1`, id,
 	).Scan(&u.ID, &u.TenantID, &u.Username, &u.FirstName, &u.LastName,
-		&u.UserType, &u.Role, &u.SipNo, &u.Active, &u.CreatedAt)
-	if err == sql.ErrNoRows { writeError(w, http.StatusNotFound, "not found"); return }
-	if err != nil { writeError(w, http.StatusInternalServerError, err.Error()); return }
+		&u.UserType, &u.Role, &u.SipNo, &u.Active, &u.CreatedAt, &u.TelegramChatID)
+	if err == sql.ErrNoRows {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	writeJSON(w, http.StatusOK, u)
 }
 
 func (h *UsersHandler) Create(w http.ResponseWriter, r *http.Request) {
 	c := mw.GetClaims(r)
 	var body struct {
-		Username  string `json:"username"`
-		Password  string `json:"password"`
-		FirstName string `json:"firstName"`
-		LastName  string `json:"lastName"`
-		UserType  int    `json:"userType"`
-		Role      int    `json:"role"`
-		SipNo     string `json:"sipNo"`
-		TenantID  *int   `json:"tenantId"`
+		Username       string `json:"username"`
+		Password       string `json:"password"`
+		FirstName      string `json:"firstName"`
+		LastName       string `json:"lastName"`
+		UserType       int    `json:"userType"`
+		Role           int    `json:"role"`
+		SipNo          string `json:"sipNo"`
+		TenantID       *int   `json:"tenantId"`
+		TelegramChatID string `json:"telegramChatId"`
 	}
 	if err := decode(r, &body); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid body")
@@ -108,20 +119,26 @@ func (h *UsersHandler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	hash, err := bcrypt.GenerateFromPassword([]byte(body.Password), bcrypt.DefaultCost)
-	if err != nil { writeError(w, http.StatusInternalServerError, "hash error"); return }
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "hash error")
+		return
+	}
 
 	serverID := pickServerID(h.DB)
 
 	var id int
 	err = h.DB.QueryRowContext(r.Context(),
 		`INSERT INTO users
-			(tenant_id, username, password_hash, sip_password, first_name, last_name, user_type, role, sip_no, active, server_id)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,FALSE,$10) RETURNING id`,
+			(tenant_id, username, password_hash, sip_password, first_name, last_name, user_type, role, sip_no, active, server_id, telegram_chat_id)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,FALSE,$10,$11) RETURNING id`,
 		body.TenantID, body.Username, string(hash),
 		body.Password,
-		body.FirstName, body.LastName, body.UserType, body.Role, sipNo, serverID,
+		body.FirstName, body.LastName, body.UserType, body.Role, sipNo, serverID, body.TelegramChatID,
 	).Scan(&id)
-	if err != nil { writeError(w, http.StatusInternalServerError, err.Error()); return }
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 
 	// Create SIP account immediately so the phone is ready before activation
 	if body.Password != "" {
@@ -140,13 +157,14 @@ func (h *UsersHandler) Create(w http.ResponseWriter, r *http.Request) {
 func (h *UsersHandler) Update(w http.ResponseWriter, r *http.Request) {
 	id, _ := strconv.Atoi(chi.URLParam(r, "id"))
 	var body struct {
-		Username  string `json:"username"`
-		Password  string `json:"password"`
-		FirstName string `json:"firstName"`
-		LastName  string `json:"lastName"`
-		UserType  int    `json:"userType"`
-		Role      int    `json:"role"`
-		SipNo     string `json:"sipNo"`
+		Username       string `json:"username"`
+		Password       string `json:"password"`
+		FirstName      string `json:"firstName"`
+		LastName       string `json:"lastName"`
+		UserType       int    `json:"userType"`
+		Role           int    `json:"role"`
+		SipNo          string `json:"sipNo"`
+		TelegramChatID string `json:"telegramChatId"`
 	}
 	if err := decode(r, &body); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid body")
@@ -160,14 +178,20 @@ func (h *UsersHandler) Update(w http.ResponseWriter, r *http.Request) {
 
 	if body.Password != "" {
 		hash, err := bcrypt.GenerateFromPassword([]byte(body.Password), bcrypt.DefaultCost)
-		if err != nil { writeError(w, http.StatusInternalServerError, "hash error"); return }
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "hash error")
+			return
+		}
 		_, err = h.DB.ExecContext(r.Context(),
 			`UPDATE users SET username=$1, password_hash=$2, sip_password=$3,
-			 first_name=$4, last_name=$5, user_type=$6, role=$7, sip_no=$8, updated_at=NOW()
-			 WHERE id=$9`,
+			 first_name=$4, last_name=$5, user_type=$6, role=$7, sip_no=$8, telegram_chat_id=$9, updated_at=NOW()
+			 WHERE id=$10`,
 			body.Username, string(hash), body.Password,
-			body.FirstName, body.LastName, body.UserType, body.Role, sipNo, id)
-		if err != nil { writeError(w, http.StatusInternalServerError, err.Error()); return }
+			body.FirstName, body.LastName, body.UserType, body.Role, sipNo, body.TelegramChatID, id)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
 
 		// Update SIP password in Asterisk if account exists
 		_, _ = h.DB.ExecContext(r.Context(),
@@ -175,10 +199,13 @@ func (h *UsersHandler) Update(w http.ResponseWriter, r *http.Request) {
 	} else {
 		_, err := h.DB.ExecContext(r.Context(),
 			`UPDATE users SET username=$1, first_name=$2, last_name=$3,
-			 user_type=$4, role=$5, sip_no=$6, updated_at=NOW() WHERE id=$7`,
+			 user_type=$4, role=$5, sip_no=$6, telegram_chat_id=$7, updated_at=NOW() WHERE id=$8`,
 			body.Username, body.FirstName, body.LastName,
-			body.UserType, body.Role, sipNo, id)
-		if err != nil { writeError(w, http.StatusInternalServerError, err.Error()); return }
+			body.UserType, body.Role, sipNo, body.TelegramChatID, id)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -191,7 +218,10 @@ func (h *UsersHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	_ = h.DB.QueryRowContext(r.Context(), `SELECT username FROM users WHERE id=$1`, id).Scan(&username)
 
 	_, err := h.DB.ExecContext(r.Context(), `DELETE FROM users WHERE id=$1`, id)
-	if err != nil { writeError(w, http.StatusInternalServerError, err.Error()); return }
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 
 	// Remove SIP account
 	if username != "" {
@@ -227,7 +257,10 @@ func (h *UsersHandler) Activate(w http.ResponseWriter, r *http.Request) {
 	err := h.DB.QueryRowContext(r.Context(),
 		`SELECT username, sip_password, tenant_id FROM users WHERE id=$1`, id,
 	).Scan(&username, &sipPassword, &tenantID)
-	if err != nil { writeError(w, http.StatusInternalServerError, err.Error()); return }
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 
 	// Determine dialplan context
 	ctx := "default"
@@ -245,7 +278,10 @@ func (h *UsersHandler) Activate(w http.ResponseWriter, r *http.Request) {
 
 	_, err = h.DB.ExecContext(r.Context(),
 		`UPDATE users SET active=TRUE, updated_at=NOW() WHERE id=$1`, id)
-	if err != nil { writeError(w, http.StatusInternalServerError, err.Error()); return }
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -258,7 +294,10 @@ func (h *UsersHandler) Deactivate(w http.ResponseWriter, r *http.Request) {
 
 	_, err := h.DB.ExecContext(r.Context(),
 		`UPDATE users SET active=FALSE, updated_at=NOW() WHERE id=$1`, id)
-	if err != nil { writeError(w, http.StatusInternalServerError, err.Error()); return }
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 
 	// Remove SIP account from Asterisk
 	if username != "" {
@@ -278,7 +317,10 @@ func (h *UsersHandler) ResetPassword(w http.ResponseWriter, r *http.Request) {
 	}
 
 	hash, err := bcrypt.GenerateFromPassword([]byte(body.Password), bcrypt.DefaultCost)
-	if err != nil { writeError(w, http.StatusInternalServerError, "hash error"); return }
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "hash error")
+		return
+	}
 
 	var username string
 	_ = h.DB.QueryRowContext(r.Context(), `SELECT username FROM users WHERE id=$1`, id).Scan(&username)
@@ -286,7 +328,10 @@ func (h *UsersHandler) ResetPassword(w http.ResponseWriter, r *http.Request) {
 	_, err = h.DB.ExecContext(r.Context(),
 		`UPDATE users SET password_hash=$1, sip_password=$2, updated_at=NOW() WHERE id=$3`,
 		string(hash), body.Password, id)
-	if err != nil { writeError(w, http.StatusInternalServerError, err.Error()); return }
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 
 	// Sync to Asterisk
 	if username != "" {
@@ -366,7 +411,10 @@ func (h *UsersHandler) ListUnauthorized(w http.ResponseWriter, r *http.Request) 
 	rows, err := h.DB.QueryContext(r.Context(),
 		`SELECT id, username, first_name, last_name, sip_no, auth_code, created_at
 		 FROM users WHERE phone_verified = FALSE ORDER BY created_at DESC`)
-	if err != nil { writeError(w, http.StatusInternalServerError, err.Error()); return }
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	defer rows.Close()
 
 	result := []unauthorizedUser{}

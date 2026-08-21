@@ -4,6 +4,8 @@ import (
 	"database/sql"
 	"fmt"
 	"io"
+	"log"
+	"mime/multipart"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -136,6 +138,10 @@ func (h *IVRHandler) UpdateConfig(w http.ResponseWriter, r *http.Request) {
 		MaxCallers       int    `json:"maxCallers"`
 		MOHClass         string `json:"mohClass"`
 		WhitelistEnabled bool   `json:"whitelistEnabled"`
+		WorkHoursEnabled bool   `json:"workHoursEnabled"`
+		WorkHoursStart   string `json:"workHoursStart"`
+		WorkHoursEnd     string `json:"workHoursEnd"`
+		WorkDays         string `json:"workDays"`
 	}
 	if err := decode(r, &body); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid body")
@@ -150,20 +156,32 @@ func (h *IVRHandler) UpdateConfig(w http.ResponseWriter, r *http.Request) {
 	if body.Strategy == "" {
 		body.Strategy = "ringall"
 	}
+	if body.WorkHoursStart == "" {
+		body.WorkHoursStart = "09:00"
+	}
+	if body.WorkHoursEnd == "" {
+		body.WorkHoursEnd = "18:00"
+	}
+	if body.WorkDays == "" {
+		body.WorkDays = "mon,tue,wed,thu,fri"
+	}
 
 	_, err = h.DB.ExecContext(r.Context(),
 		`UPDATE ivr_configs SET strategy=$1, wait_timeout=$2, queue_timeout=$3,
-		  max_callers=$4, moh_class=$5, whitelist_enabled=$6, updated_at=NOW()
-		 WHERE kc_number_id=$7`,
+		  max_callers=$4, moh_class=$5, whitelist_enabled=$6,
+		  work_hours_enabled=$7, work_hours_start=$8, work_hours_end=$9, work_days=$10,
+		  updated_at=NOW()
+		 WHERE kc_number_id=$11`,
 		body.Strategy, body.WaitTimeout, body.QueueTimeout,
-		body.MaxCallers, body.MOHClass, body.WhitelistEnabled, kcID)
+		body.MaxCallers, body.MOHClass, body.WhitelistEnabled,
+		body.WorkHoursEnabled, body.WorkHoursStart, body.WorkHoursEnd, body.WorkDays, kcID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
-	// Sync queue strategy/limits in Asterisk
-	if err := asterisk.UpsertKCQueue(h.DB, kcID, body.Strategy, 15, body.MaxCallers); err != nil {
+	// Sync queue strategy/limits/hold-music class in Asterisk
+	if err := asterisk.UpsertKCQueue(h.DB, kcID, body.Strategy, 15, body.MaxCallers, body.MOHClass); err != nil {
 		writeError(w, http.StatusInternalServerError, "queue: "+err.Error())
 		return
 	}
@@ -171,7 +189,56 @@ func (h *IVRHandler) UpdateConfig(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// UploadGreeting accepts a WAV/GSM file and stores it for Asterisk.
+// validUploadExt checks an uploaded prompt/hold-music file's extension
+// against what a browser or admin might reasonably send in — the actual
+// on-disk format is normalized by saveConvertedUpload regardless.
+func validUploadExt(ext string) bool {
+	return ext == ".wav" || ext == ".gsm" || ext == ".mp3" || ext == ".ulaw"
+}
+
+// saveConvertedUpload writes an uploaded file under dir as baseName.wav,
+// transcoding it to Asterisk's expected format on the way in (8kHz mono
+// u-law — see asterisk.ConvertToAsteriskWAV) regardless of what format was
+// actually uploaded, so admins never need to pre-convert files themselves.
+// Also removes any other-extension leftovers from a previous upload under
+// the same baseName (e.g. a pre-conversion-support greeting-5.mp3 sitting
+// next to the new greeting-5.wav), so Asterisk's own extension search can't
+// pick the stale, unconverted file instead.
+func saveConvertedUpload(dir, baseName, ext string, file multipart.File) error {
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("cannot create upload dir: %w", err)
+	}
+
+	tmpPath := filepath.Join(dir, baseName+".upload"+ext)
+	tmp, err := os.Create(tmpPath)
+	if err != nil {
+		return fmt.Errorf("cannot create temp file: %w", err)
+	}
+	if _, err := io.Copy(tmp, file); err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return fmt.Errorf("upload failed: %w", err)
+	}
+	tmp.Close()
+	defer os.Remove(tmpPath)
+
+	destPath := filepath.Join(dir, baseName+".wav")
+	if err := asterisk.ConvertToAsteriskWAV(tmpPath, destPath); err != nil {
+		return err
+	}
+
+	if leftovers, err := filepath.Glob(filepath.Join(dir, baseName+".*")); err == nil {
+		for _, f := range leftovers {
+			if f != destPath {
+				os.Remove(f)
+			}
+		}
+	}
+	return nil
+}
+
+// UploadGreeting accepts an audio file and stores it for Asterisk, converted
+// to 8kHz mono u-law WAV (see saveConvertedUpload).
 func (h *IVRHandler) UploadGreeting(w http.ResponseWriter, r *http.Request) {
 	kcID, _, err := h.kcNumberID(r)
 	if err != nil {
@@ -188,29 +255,16 @@ func (h *IVRHandler) UploadGreeting(w http.ResponseWriter, r *http.Request) {
 	defer file.Close()
 
 	ext := strings.ToLower(filepath.Ext(header.Filename))
-	if ext != ".wav" && ext != ".gsm" && ext != ".mp3" && ext != ".ulaw" {
+	if !validUploadExt(ext) {
 		writeError(w, http.StatusBadRequest, "supported formats: wav, gsm, mp3, ulaw")
 		return
 	}
 
-	dir := filepath.Join(h.UploadsDir, "ivr", fmt.Sprintf("kc-%d", kcID))
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		writeError(w, http.StatusInternalServerError, "cannot create upload dir")
-		return
-	}
-
 	// Filename Asterisk will use: greeting-{kcNumberID} (without extension)
+	dir := filepath.Join(h.UploadsDir, "ivr", fmt.Sprintf("kc-%d", kcID))
 	asteriskName := fmt.Sprintf("greeting-%d", kcID)
-	destPath := filepath.Join(dir, asteriskName+ext)
-
-	dst, err := os.Create(destPath)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "cannot create file")
-		return
-	}
-	defer dst.Close()
-	if _, err := io.Copy(dst, file); err != nil {
-		writeError(w, http.StatusInternalServerError, "upload failed")
+	if err := saveConvertedUpload(dir, asteriskName, ext, file); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
@@ -223,6 +277,110 @@ func (h *IVRHandler) UploadGreeting(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{
 		"file":         header.Filename,
 		"asteriskPath": asteriskPath,
+	})
+}
+
+// UploadClosedGreeting accepts an audio file played instead of the regular
+// greeting when the call arrives outside work hours (see work_hours_enabled
+// and writeKCDialplan's closed-hours branch). Same storage/conversion
+// pattern as UploadGreeting, just a distinct filename/column so both can
+// coexist independently.
+func (h *IVRHandler) UploadClosedGreeting(w http.ResponseWriter, r *http.Request) {
+	kcID, _, err := h.kcNumberID(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	r.ParseMultipartForm(20 << 20) // 20 MB
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "file required")
+		return
+	}
+	defer file.Close()
+
+	ext := strings.ToLower(filepath.Ext(header.Filename))
+	if !validUploadExt(ext) {
+		writeError(w, http.StatusBadRequest, "supported formats: wav, gsm, mp3, ulaw")
+		return
+	}
+
+	dir := filepath.Join(h.UploadsDir, "ivr", fmt.Sprintf("kc-%d", kcID))
+	asteriskName := fmt.Sprintf("closed-greeting-%d", kcID)
+	if err := saveConvertedUpload(dir, asteriskName, ext, file); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	asteriskPath := fmt.Sprintf("ivr/kc-%d/%s", kcID, asteriskName)
+	_, _ = h.DB.ExecContext(r.Context(),
+		`UPDATE ivr_configs SET closed_greeting_file=$1, updated_at=NOW() WHERE kc_number_id=$2`,
+		asteriskPath, kcID)
+
+	writeJSON(w, http.StatusOK, map[string]string{
+		"file":         header.Filename,
+		"asteriskPath": asteriskPath,
+	})
+}
+
+// UploadMOH accepts an audio file to use as this KC number's hold music: it
+// creates/updates a dedicated realtime MOH class (see asterisk.UpsertMOHClass)
+// named after the number, points ivr_configs.moh_class at it, and applies it
+// to the live queue immediately (unlike greeting/menu changes, hold music
+// doesn't touch the dialplan, so there's no reason to make the admin also
+// click "Apply to Asterisk" just for this). Requires realtime MOH configured
+// on the Asterisk server — see the ast_musiconhold comment in migration.sql;
+// without that one-time step, this still stores the file and writes the DB
+// rows, but Asterisk won't actually pick up the new class.
+func (h *IVRHandler) UploadMOH(w http.ResponseWriter, r *http.Request) {
+	kcID, _, err := h.kcNumberID(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	r.ParseMultipartForm(20 << 20) // 20 MB
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "file required")
+		return
+	}
+	defer file.Close()
+
+	ext := strings.ToLower(filepath.Ext(header.Filename))
+	if !validUploadExt(ext) {
+		writeError(w, http.StatusBadRequest, "supported formats: wav, gsm, mp3, ulaw")
+		return
+	}
+
+	className := asterisk.MOHClassName(kcID)
+	relDir := fmt.Sprintf("moh/%s", className)
+	dir := filepath.Join(h.UploadsDir, relDir)
+	if err := saveConvertedUpload(dir, "hold", ext, file); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	if err := asterisk.UpsertMOHClass(h.DB, className, relDir); err != nil {
+		writeError(w, http.StatusInternalServerError, "moh class: "+err.Error())
+		return
+	}
+
+	var strategy string
+	var maxCallers int
+	_ = h.DB.QueryRowContext(r.Context(),
+		`UPDATE ivr_configs SET moh_class=$1, updated_at=NOW() WHERE kc_number_id=$2 RETURNING strategy, max_callers`,
+		className, kcID).Scan(&strategy, &maxCallers)
+
+	if err := asterisk.UpsertKCQueue(h.DB, kcID, strategy, 15, maxCallers, className); err != nil {
+		writeError(w, http.StatusInternalServerError, "queue: "+err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{
+		"file":     header.Filename,
+		"mohClass": className,
 	})
 }
 
@@ -398,11 +556,11 @@ func (h *IVRHandler) Sync(w http.ResponseWriter, r *http.Request) {
 	err = h.DB.QueryRowContext(r.Context(),
 		`SELECT greeting_file, wait_timeout, queue_timeout, strategy, max_callers,
 		        closed_greeting_file, work_hours_enabled, work_hours_start, work_hours_end, work_days,
-		        whitelist_enabled
+		        whitelist_enabled, moh_class
 		 FROM ivr_configs WHERE kc_number_id=$1`, kcID,
 	).Scan(&cfg.GreetingFile, &cfg.WaitTimeout, &cfg.QueueTimeout, &cfg.Strategy, &cfg.MaxCallers,
 		&cfg.ClosedGreetingFile, &cfg.WorkHoursEnabled, &cfg.WorkHoursStart, &cfg.WorkHoursEnd, &cfg.WorkDays,
-		&cfg.WhitelistEnabled)
+		&cfg.WhitelistEnabled, &cfg.MOHClass)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -463,7 +621,7 @@ func (h *IVRHandler) Sync(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Sync queue
-	if err := asterisk.UpsertKCQueue(h.DB, kcID, cfg.Strategy, 15, cfg.MaxCallers); err != nil {
+	if err := asterisk.UpsertKCQueue(h.DB, kcID, cfg.Strategy, 15, cfg.MaxCallers, cfg.MOHClass); err != nil {
 		writeError(w, http.StatusInternalServerError, "queue: "+err.Error())
 		return
 	}
@@ -478,6 +636,117 @@ func (h *IVRHandler) Sync(w http.ResponseWriter, r *http.Request) {
 		"context": providerContext,
 		"queue":   queueName,
 	})
+}
+
+// ResyncAllDialplans rewrites every KC number's inbound dialplan + queue
+// settings from its current ivr_configs/ivr_options — the bulk, no-HTTP-
+// request counterpart of IVRHandler.Sync (see resyncOneDialplan below, which
+// mirrors Sync's config-to-dialplan mapping exactly). Meant to run once at
+// startup (see cmd/server/main.go): whenever how that dialplan gets
+// generated changes (e.g. addRecording gaining its Set(CDR(userfield)=...)
+// line so recordings become linkable in the UI), any KC number nobody has
+// happened to resync since keeps running its old dialplan otherwise —
+// MixMonitor still writes the file to MinIO fine, but ast_cdr.userfield
+// never gets set for it, so CDRHandler has no way to find it. Idempotent
+// (SyncKCNumberDialplan/UpsertKCQueue both DELETE+rewrite or UPDATE-or-INSERT),
+// so safe to run on every startup. Best-effort per number: one bad
+// ivr_configs row shouldn't block the rest from getting resynced.
+func ResyncAllDialplans(db *sql.DB) error {
+	rows, err := db.Query(`SELECT id FROM kc_numbers`)
+	if err != nil {
+		return fmt.Errorf("list kc numbers: %w", err)
+	}
+	var ids []int
+	for rows.Next() {
+		var id int
+		if err := rows.Scan(&id); err != nil {
+			continue
+		}
+		ids = append(ids, id)
+	}
+	rows.Close()
+
+	for _, kcID := range ids {
+		if err := resyncOneDialplan(db, kcID); err != nil {
+			log.Printf("[IVR] resync kc number %d: %v", kcID, err)
+		}
+	}
+	return nil
+}
+
+func resyncOneDialplan(db *sql.DB, kcID int) error {
+	var cfg IVRConfig
+	err := db.QueryRow(
+		`SELECT greeting_file, wait_timeout, queue_timeout, strategy, max_callers,
+		        closed_greeting_file, work_hours_enabled, work_hours_start, work_hours_end, work_days,
+		        whitelist_enabled, moh_class
+		 FROM ivr_configs WHERE kc_number_id=$1`, kcID,
+	).Scan(&cfg.GreetingFile, &cfg.WaitTimeout, &cfg.QueueTimeout, &cfg.Strategy, &cfg.MaxCallers,
+		&cfg.ClosedGreetingFile, &cfg.WorkHoursEnabled, &cfg.WorkHoursStart, &cfg.WorkHoursEnd, &cfg.WorkDays,
+		&cfg.WhitelistEnabled, &cfg.MOHClass)
+	if err != nil {
+		return fmt.Errorf("load ivr_configs: %w", err)
+	}
+
+	optRows, err := db.Query(
+		`SELECT digit, action, action_data FROM ivr_options WHERE kc_number_id=$1 ORDER BY sort_order, digit`, kcID)
+	if err != nil {
+		return fmt.Errorf("load ivr_options: %w", err)
+	}
+	type rawOpt struct{ digit, action, actionData string }
+	var opts []rawOpt
+	for optRows.Next() {
+		var o rawOpt
+		if err := optRows.Scan(&o.digit, &o.action, &o.actionData); err != nil {
+			continue
+		}
+		opts = append(opts, o)
+	}
+	optRows.Close()
+
+	// Same action → dialplan app/appdata mapping as Sync above.
+	queueName := asterisk.KCQueueName(kcID)
+	var dpOptions []asterisk.IVRDialplanOption
+	for _, opt := range opts {
+		var app, appData string
+		switch opt.action {
+		case "queue":
+			app = "Queue"
+			if opt.actionData != "" {
+				appData = opt.actionData
+			} else {
+				appData = fmt.Sprintf("%s,rHhc,,%d", queueName, cfg.QueueTimeout)
+			}
+		case "extension":
+			app = "Dial"
+			appData = fmt.Sprintf("PJSIP/%s,30,rU", opt.actionData)
+		case "playback":
+			app = "Playback"
+			appData = opt.actionData
+		case "hangup":
+			app = "Hangup"
+			appData = ""
+		default:
+			app = "Queue"
+			appData = fmt.Sprintf("%s,rHhc,,%d", queueName, cfg.QueueTimeout)
+		}
+		dpOptions = append(dpOptions, asterisk.IVRDialplanOption{Digit: opt.digit, App: app, AppData: appData})
+	}
+
+	wh := asterisk.WorkHours{
+		Enabled:        cfg.WorkHoursEnabled,
+		Start:          cfg.WorkHoursStart,
+		End:            cfg.WorkHoursEnd,
+		Days:           cfg.WorkDays,
+		ClosedGreeting: cfg.ClosedGreetingFile,
+	}
+	if err := asterisk.SyncKCNumberDialplan(db, kcID, cfg.GreetingFile, cfg.WaitTimeout, cfg.QueueTimeout, dpOptions, wh, cfg.WhitelistEnabled); err != nil {
+		return fmt.Errorf("dialplan: %w", err)
+	}
+	if err := asterisk.UpsertKCQueue(db, kcID, cfg.Strategy, 15, cfg.MaxCallers, cfg.MOHClass); err != nil {
+		return fmt.Errorf("queue: %w", err)
+	}
+	return nil
 }
 
 // GetAvailableUsers returns tenant users not yet in this KC number's queue.

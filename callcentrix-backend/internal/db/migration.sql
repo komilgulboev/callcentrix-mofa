@@ -73,6 +73,72 @@ ALTER TABLE tickets ADD COLUMN IF NOT EXISTS topic_id INT REFERENCES topic_catal
 -- ticket to — distinct from user_id, which is whoever created/handled it.
 ALTER TABLE tickets ADD COLUMN IF NOT EXISTS assigned_user_id INT REFERENCES users(id) ON DELETE SET NULL;
 
+-- ─── Tasks (Dashboard Kanban) ─────────────────────────────────────────────────
+-- Internal work-item tracking, distinct from Tickets (customer-issue
+-- tracking): SuperAdmin/TenantAdmin create and assign tasks to
+-- Supervisors/Operators, who work them on a 4-column Kanban board.
+CREATE TABLE IF NOT EXISTS tasks (
+    id               SERIAL PRIMARY KEY,
+    tenant_id        INT REFERENCES tenants(id) ON DELETE SET NULL,
+    title            VARCHAR(500) NOT NULL,
+    description      TEXT DEFAULT '',
+    status           VARCHAR(20) NOT NULL DEFAULT 'todo',  -- todo in_progress waiting resolved
+    created_by       INT REFERENCES users(id) ON DELETE SET NULL,
+    assigned_user_id INT REFERENCES users(id) ON DELETE SET NULL,
+    created_at       TIMESTAMPTZ DEFAULT NOW(),
+    updated_at       TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Many-to-many: a task can be assigned to several Supervisors/Operators, one
+-- of whom may optionally be marked primary (see internal/handlers/tasks.go
+-- canChangeStatus) — when a primary is set, only they may change the task's
+-- status; everyone else on the task sees the same shared status/board entry
+-- and gets notified of every change regardless.
+CREATE TABLE IF NOT EXISTS task_assignees (
+    task_id    INT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    user_id    INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    is_primary BOOLEAN NOT NULL DEFAULT FALSE,
+    PRIMARY KEY (task_id, user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_task_assignees_user ON task_assignees(user_id);
+-- At most one primary per task.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_task_assignees_one_primary ON task_assignees(task_id) WHERE is_primary;
+
+-- One-time backfill: migrate the old single-assignee column into the new
+-- many-assignees model (as that task's primary, since it was previously the
+-- sole/exclusive status-changer) before dropping it. Guarded by an
+-- information_schema check, not just IF EXISTS on the ALTER, because the
+-- backfill SELECT itself references the column by name — on a second run
+-- (column already gone) that SELECT would fail to parse if it weren't
+-- skipped entirely, unlike a plain DROP COLUMN IF EXISTS.
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'tasks' AND column_name = 'assigned_user_id'
+    ) THEN
+        INSERT INTO task_assignees (task_id, user_id, is_primary)
+        SELECT id, assigned_user_id, TRUE FROM tasks
+        WHERE assigned_user_id IS NOT NULL
+        ON CONFLICT (task_id, user_id) DO NOTHING;
+
+        ALTER TABLE tasks DROP COLUMN assigned_user_id;
+    END IF;
+END $$;
+
+-- In-app notifications for a task's creator, fired whenever its status
+-- changes — the Dashboard header bell polls this. See also telegram_settings
+-- below and users.telegram_chat_id for the Telegram delivery side.
+CREATE TABLE IF NOT EXISTS task_notifications (
+    id         SERIAL PRIMARY KEY,
+    task_id    INT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    user_id    INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,  -- recipient (the creator)
+    status     VARCHAR(20) NOT NULL,
+    message    TEXT NOT NULL DEFAULT '',
+    is_read    BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
 -- ─── Blacklist (phone numbers) ───────────────────────────────────────────────
 -- Default-allow gate: callers are let through unless their number is an
 -- active, non-expired blacklist entry for the tenant. expires_at NULL means
@@ -105,6 +171,16 @@ WHERE app = 'Gosub' AND appdata LIKE 'whitelist-check,s,1(%';
 
 UPDATE ast_extensions SET appdata = '$["${GOSUB_RETVAL}" = "1"]?blocked,s,1'
 WHERE app = 'GotoIf' AND appdata = '$["${GOSUB_RETVAL}" = "0"]?blocked,s,1';
+
+-- One-time backfill: existing tenants' 'h' (hangup handler) extension was
+-- written with an explicit Hangup() app (see asterisk.CreateTenantContext).
+-- The channel is already tearing down by the time 'h' runs, so that call was
+-- redundant — and was spawning a spurious zero-duration CDR row (dst='h')
+-- alongside every real call's own CDR. The generator now writes NoOp here
+-- instead; this backfill applies the same fix to tenants created before that
+-- change. Safe to rerun: matches 0 rows once applied.
+UPDATE ast_extensions SET app = 'NoOp'
+WHERE context LIKE 'tenant-%' AND exten = 'h' AND priority = 1 AND app = 'Hangup';
 
 -- ─── Whitelist (phone numbers) ───────────────────────────────────────────────
 -- Opt-in default-deny gate, per KC number (see ivr_configs.whitelist_enabled
@@ -244,6 +320,37 @@ UPDATE ivr_options io SET kc_number_id = ic.kc_number_id
 FROM ivr_configs ic
 WHERE io.kc_number_id IS NULL AND ic.kc_number_id IS NOT NULL AND ic.tenant_id = io.tenant_id;
 
+-- ─── Music On Hold (realtime, one class per KC number) ───────────────────────
+-- Standard Asterisk realtime "musiconhold" family columns (res_musiconhold's
+-- ODBC/realtime backend) — this app owns this table's schema the same way it
+-- owns ast_cdr's, unlike ast_extensions/ast_ps_endpoints/ast_queues, which
+-- are assumed pre-provisioned. IMPORTANT: creating the table alone isn't
+-- enough — Asterisk only reads MOH classes from here once musiconhold.conf
+-- on the Asterisk server has a realtime family pointing at it, e.g.:
+--   [general]
+--   realtime=yes
+-- and in extconfig.conf (or res_odbc.conf's realtime mapping):
+--   musiconhold => odbc,<dsn>,ast_musiconhold
+-- This is a one-time manual step per Asterisk server — same category as the
+-- provider-context declarations in extensions.conf documented in
+-- ASTERISK_CLUSTER_SETUP.md, which this backend also can't do for you since
+-- it has no filesystem access to Asterisk's own config files. See
+-- IVRHandler.UploadMOH / asterisk.UpsertMOHClass for how rows here get
+-- written, and note `directory` is resolved by Asterisk relative to its own
+-- MOH root (/var/lib/asterisk/moh/ by default) — the uploaded file only
+-- plays if that path is reachable from the Asterisk box, same shared-storage
+-- assumption already relied on for IVR greetings (UploadsDir).
+CREATE TABLE IF NOT EXISTS ast_musiconhold (
+    id          SERIAL PRIMARY KEY,
+    name        VARCHAR(80) NOT NULL UNIQUE,
+    mode        VARCHAR(20)  NOT NULL DEFAULT 'files',
+    directory   VARCHAR(255) NOT NULL DEFAULT '',
+    application VARCHAR(255) DEFAULT '',
+    digit       VARCHAR(1)   DEFAULT '',
+    sort        VARCHAR(20)  DEFAULT 'random',
+    format      VARCHAR(20)  DEFAULT ''
+);
+
 -- ─── Asterisk CDR (populated directly by Asterisk's cdr_pgsql module) ────────
 -- Column names/types follow the standard Asterisk CDR field set so cdr_pgsql
 -- can map to them automatically; `id` is app-only (used for row lookups).
@@ -312,6 +419,26 @@ CREATE TABLE IF NOT EXISTS smpp_settings (
 );
 INSERT INTO smpp_settings (id) VALUES (1) ON CONFLICT (id) DO NOTHING;
 
+-- Single-row Telegram bot config (same pattern as smpp_settings). Outbound
+-- notifications only — no getUpdates polling/bot-linking flow — chat IDs are
+-- entered manually per-user (see users.telegram_chat_id below).
+CREATE TABLE IF NOT EXISTS telegram_settings (
+    id         INT PRIMARY KEY DEFAULT 1,
+    bot_token  VARCHAR(255) NOT NULL DEFAULT '',
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    CONSTRAINT telegram_settings_single_row CHECK (id = 1)
+);
+INSERT INTO telegram_settings (id) VALUES (1) ON CONFLICT (id) DO NOTHING;
+
+-- Tracks getUpdates' offset for the long-polling bot (see
+-- TasksHandler.RunTelegramBot) so a backend restart doesn't replay
+-- already-handled task-status button presses.
+ALTER TABLE telegram_settings ADD COLUMN IF NOT EXISTS update_offset INT NOT NULL DEFAULT 0;
+
+-- Manually entered by SuperAdmin/TenantAdmin on the user's create/edit form —
+-- targets Telegram task-assignment/status-change notifications at this user.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS telegram_chat_id VARCHAR(64) DEFAULT '';
+
 -- ─── Asterisk Servers (multi-box telephony, single shared DB) ───────────────
 -- One row per physical Asterisk box. Users are assigned to a server
 -- (least-loaded, see asterisk.PickLeastLoadedServer) so their softphone WS
@@ -334,6 +461,65 @@ CREATE TABLE IF NOT EXISTS asterisk_servers (
 -- fallback server (cfg.AMIAddr/AsteriskWSURI) until servers are configured.
 ALTER TABLE users ADD COLUMN IF NOT EXISTS server_id INT REFERENCES asterisk_servers(id);
 
+-- ─── Knowledge Base ───────────────────────────────────────────────────────────
+-- Guides TenantAdmin writes for their own tenant's operators. Categories are a
+-- shared global taxonomy curated by SuperAdmin (same shape as topic_catalog);
+-- articles themselves are strictly tenant-scoped and never visible cross-tenant.
+CREATE TABLE IF NOT EXISTS kb_categories (
+    id         SERIAL PRIMARY KEY,
+    names      JSONB NOT NULL DEFAULT '{}',  -- {"ru":"...","tj":"...","en":"..."}
+    active     BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS kb_articles (
+    id          SERIAL PRIMARY KEY,
+    tenant_id   INT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    category_id INT REFERENCES kb_categories(id) ON DELETE SET NULL,
+    title       VARCHAR(500) NOT NULL,
+    body        TEXT DEFAULT '',
+    created_by  INT REFERENCES users(id) ON DELETE SET NULL,
+    created_at  TIMESTAMPTZ DEFAULT NOW(),
+    updated_at  TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Freeform hashtags, many per article; normalized lowercase, no leading '#'.
+CREATE TABLE IF NOT EXISTS kb_article_tags (
+    article_id INT NOT NULL REFERENCES kb_articles(id) ON DELETE CASCADE,
+    tag        VARCHAR(100) NOT NULL,
+    PRIMARY KEY (article_id, tag)
+);
+
+-- Photos/videos attached to an article, stored in MinIO (see
+-- KnowledgeBaseHandler.UploadArticleMedia) under object key "kb/<article_id>/<id><ext>"
+-- — same bucket as call recordings (cfg.MinioBucket), segregated by prefix.
+-- Replaces the earlier local-disk kb_article_photos: video support was added
+-- alongside a move to MinIO, so photos moved there too rather than keeping
+-- two different storage backends for the same "article media" concept.
+DROP TABLE IF EXISTS kb_article_photos;
+CREATE TABLE IF NOT EXISTS kb_article_media (
+    id           SERIAL PRIMARY KEY,
+    article_id   INT NOT NULL REFERENCES kb_articles(id) ON DELETE CASCADE,
+    media_type   VARCHAR(10) NOT NULL DEFAULT 'photo',  -- photo | video
+    object_key   VARCHAR(255) NOT NULL DEFAULT '',
+    content_type VARCHAR(100) NOT NULL DEFAULT '',
+    created_at   TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Article visibility: by default every tenant member can read an article
+-- (visible_to_all). A TenantAdmin may instead restrict it to specific
+-- Supervisors/Operators via kb_article_users — see
+-- KnowledgeBaseHandler.ListArticles/GetArticle for the enforcement (the
+-- authoring TenantAdmin and SuperAdmin always bypass this, same as they
+-- already bypass tenant-scoping for management purposes).
+ALTER TABLE kb_articles ADD COLUMN IF NOT EXISTS visible_to_all BOOLEAN NOT NULL DEFAULT TRUE;
+
+CREATE TABLE IF NOT EXISTS kb_article_users (
+    article_id INT NOT NULL REFERENCES kb_articles(id) ON DELETE CASCADE,
+    user_id    INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    PRIMARY KEY (article_id, user_id)
+);
+
 -- ─── Indexes ──────────────────────────────────────────────────────────────────
 CREATE INDEX IF NOT EXISTS idx_tickets_tenant    ON tickets(tenant_id);
 CREATE INDEX IF NOT EXISTS idx_tickets_status    ON tickets(status);
@@ -344,3 +530,12 @@ CREATE INDEX IF NOT EXISTS idx_users_server      ON users(server_id);
 CREATE INDEX IF NOT EXISTS idx_topic_tenant      ON topic_catalog(tenant_id);
 CREATE INDEX IF NOT EXISTS idx_tickets_topic     ON tickets(topic_id);
 CREATE INDEX IF NOT EXISTS idx_tickets_assigned  ON tickets(assigned_user_id);
+CREATE INDEX IF NOT EXISTS idx_tasks_tenant      ON tasks(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_tasks_creator     ON tasks(created_by);
+CREATE INDEX IF NOT EXISTS idx_tasks_status      ON tasks(status);
+CREATE INDEX IF NOT EXISTS idx_task_notif_user   ON task_notifications(user_id);
+CREATE INDEX IF NOT EXISTS idx_kb_articles_tenant   ON kb_articles(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_kb_articles_category ON kb_articles(category_id);
+CREATE INDEX IF NOT EXISTS idx_kb_article_tags_tag   ON kb_article_tags(tag);
+CREATE INDEX IF NOT EXISTS idx_kb_article_media_article ON kb_article_media(article_id);
+CREATE INDEX IF NOT EXISTS idx_kb_article_users_user ON kb_article_users(user_id);

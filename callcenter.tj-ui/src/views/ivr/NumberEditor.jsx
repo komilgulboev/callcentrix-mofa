@@ -31,6 +31,7 @@ const STRATEGIES = [
 ]
 
 const DIGITS = ['0','1','2','3','4','5','6','7','8','9','*','#']
+const WORK_DAYS = ['mon','tue','wed','thu','fri','sat','sun']
 
 // ─── Editor for a single KC number: Приветствие / Меню IVR / Очередь / Операторы ──
 export default function NumberEditor({ kcNumber, onBack }) {
@@ -44,7 +45,10 @@ export default function NumberEditor({ kcNumber, onBack }) {
   const [error,   setError]   = useState('')
   const [success, setSuccess] = useState('')
 
-  const [config,   setConfig]   = useState({ strategy: 'ringall', waitTimeout: 5, queueTimeout: 300, maxCallers: 0, mohClass: 'default', whitelistEnabled: false })
+  const [config,   setConfig]   = useState({
+    strategy: 'ringall', waitTimeout: 5, queueTimeout: 300, maxCallers: 0, mohClass: 'default', whitelistEnabled: false,
+    workHoursEnabled: false, workHoursStart: '09:00', workHoursEnd: '18:00', workDays: 'mon,tue,wed,thu,fri',
+  })
   const [options,  setOptions]  = useState([])
   const [members,  setMembers]  = useState([])
   const [availUsers, setAvailUsers] = useState([])
@@ -56,6 +60,13 @@ export default function NumberEditor({ kcNumber, onBack }) {
   const [greetingInfo, setGreetingInfo] = useState('')
   const fileRef = useRef()
 
+  const [uploadingClosed,   setUploadingClosed]   = useState(false)
+  const [closedGreetingInfo, setClosedGreetingInfo] = useState('')
+  const closedFileRef = useRef()
+
+  const [uploadingMOH, setUploadingMOH] = useState(false)
+  const mohFileRef = useRef()
+
   const load = () => {
     setLoading(true)
     ivrApi.get(kcId)
@@ -64,6 +75,7 @@ export default function NumberEditor({ kcNumber, onBack }) {
         setOptions(d.options || [])
         setMembers(d.members || [])
         setGreetingInfo(d.config?.greetingFile || '')
+        setClosedGreetingInfo(d.config?.closedGreetingFile || '')
       })
       .catch(e => setError(e.message))
       .finally(() => setLoading(false))
@@ -104,6 +116,41 @@ export default function NumberEditor({ kcNumber, onBack }) {
       setSuccess(t('number_editor.file_uploaded', { file: r.file }))
     } catch (e) { setError(e.message) }
     finally { setUploading(false) }
+  }
+
+  const handleUploadClosedGreeting = async (e) => {
+    const file = e.target.files[0]
+    if (!file) return
+    setUploadingClosed(true); setError('')
+    try {
+      const r = await ivrApi.uploadClosedGreeting(kcId, file)
+      setClosedGreetingInfo(r.asteriskPath)
+      setConfig(c => ({ ...c, closedGreetingFile: r.asteriskPath }))
+      setSuccess(t('number_editor.file_uploaded', { file: r.file }))
+    } catch (e) { setError(e.message) }
+    finally { setUploadingClosed(false) }
+  }
+
+  const handleUploadMOH = async (e) => {
+    const file = e.target.files[0]
+    if (!file) return
+    setUploadingMOH(true); setError('')
+    try {
+      const r = await ivrApi.uploadMOH(kcId, file)
+      // Applied to the live queue by the backend immediately — no separate
+      // "Apply to Asterisk" needed for hold music, unlike greeting/menu.
+      setConfig(c => ({ ...c, mohClass: r.mohClass }))
+      setSuccess(t('number_editor.file_uploaded', { file: r.file }))
+    } catch (e) { setError(e.message) }
+    finally { setUploadingMOH(false) }
+  }
+
+  const toggleWorkDay = (day) => {
+    setConfig(c => {
+      const days = c.workDays ? c.workDays.split(',') : []
+      const next = days.includes(day) ? days.filter(d => d !== day) : [...days, day]
+      return { ...c, workDays: WORK_DAYS.filter(d => next.includes(d)).join(',') }
+    })
   }
 
   const openOptModal = (opt = null) => {
@@ -221,14 +268,85 @@ export default function NumberEditor({ kcNumber, onBack }) {
                     <div className="text-muted small mb-2">
                       {t('number_editor.moh_hint')}
                     </div>
-                    <div className="d-flex gap-2" style={{ maxWidth: 300 }}>
-                      <CFormInput value={config.mohClass}
-                        onChange={e => setConfig(c => ({ ...c, mohClass: e.target.value }))}
-                        placeholder="default" />
-                      <CButton color="primary" onClick={handleSaveConfig} disabled={saving}>
-                        {t('common.save')}
+                    <CFormInput value={config.mohClass} style={{ maxWidth: 300 }} className="mb-2"
+                      onChange={e => setConfig(c => ({ ...c, mohClass: e.target.value }))}
+                      placeholder="default" />
+                    <div className="d-flex gap-2 align-items-center">
+                      <CButton color="secondary" variant="outline" onClick={() => mohFileRef.current?.click()} disabled={uploadingMOH}>
+                        {uploadingMOH
+                          ? <CSpinner size="sm" className="me-2" />
+                          : <CIcon icon={cilCloudUpload} className="me-2" />}
+                        {uploadingMOH ? t('number_editor.uploading') : t('number_editor.moh_upload_button')}
                       </CButton>
+                      <input ref={mohFileRef} type="file" accept=".wav,.gsm,.mp3,.ulaw"
+                        className="d-none" onChange={handleUploadMOH} />
                     </div>
+                    <div className="text-muted small mt-1">{t('number_editor.moh_upload_hint')}</div>
+                  </div>
+
+                  <hr />
+
+                  <div className="mt-3">
+                    <CFormCheck
+                      label={t('number_editor.work_hours_enabled_label')}
+                      checked={config.workHoursEnabled}
+                      onChange={e => setConfig(c => ({ ...c, workHoursEnabled: e.target.checked }))}
+                    />
+                    <div className="text-muted small mb-2">
+                      {t('number_editor.work_hours_hint')}
+                    </div>
+
+                    {config.workHoursEnabled && (
+                      <div className="mt-2">
+                        <CRow className="g-2 mb-3">
+                          <CCol xs={6}>
+                            <CFormLabel>{t('number_editor.work_hours_start_label')}</CFormLabel>
+                            <CFormInput type="time" value={config.workHoursStart}
+                              onChange={e => setConfig(c => ({ ...c, workHoursStart: e.target.value }))} />
+                          </CCol>
+                          <CCol xs={6}>
+                            <CFormLabel>{t('number_editor.work_hours_end_label')}</CFormLabel>
+                            <CFormInput type="time" value={config.workHoursEnd}
+                              onChange={e => setConfig(c => ({ ...c, workHoursEnd: e.target.value }))} />
+                          </CCol>
+                        </CRow>
+
+                        <CFormLabel>{t('number_editor.work_days_label')}</CFormLabel>
+                        <div className="d-flex flex-wrap gap-3 mb-3">
+                          {WORK_DAYS.map(day => (
+                            <CFormCheck key={day} id={`day-${day}`}
+                              label={t(`number_editor.day_${day}`)}
+                              checked={(config.workDays || '').split(',').includes(day)}
+                              onChange={() => toggleWorkDay(day)} />
+                          ))}
+                        </div>
+
+                        <CFormLabel className="fw-semibold">{t('number_editor.closed_greeting_label')}</CFormLabel>
+                        <div className="text-muted small mb-2">
+                          {t('number_editor.closed_greeting_hint')}
+                        </div>
+                        {closedGreetingInfo && (
+                          <CAlert color="info" className="small py-2 mb-3">
+                            {t('number_editor.current_asterisk_file_label')} <code>{closedGreetingInfo}</code>
+                          </CAlert>
+                        )}
+                        <div className="d-flex gap-2 align-items-center mb-3">
+                          <CButton color="secondary" variant="outline" onClick={() => closedFileRef.current?.click()} disabled={uploadingClosed}>
+                            {uploadingClosed
+                              ? <CSpinner size="sm" className="me-2" />
+                              : <CIcon icon={cilCloudUpload} className="me-2" />}
+                            {uploadingClosed ? t('number_editor.uploading') : t('number_editor.upload_file')}
+                          </CButton>
+                          <input ref={closedFileRef} type="file" accept=".wav,.gsm,.mp3,.ulaw"
+                            className="d-none" onChange={handleUploadClosedGreeting} />
+                        </div>
+                      </div>
+                    )}
+
+                    <CButton color="primary" onClick={handleSaveConfig} disabled={saving}>
+                      {saving ? <CSpinner size="sm" className="me-2" /> : null}
+                      {t('number_editor.save_settings')}
+                    </CButton>
                   </div>
                 </div>
               </CTabPane>

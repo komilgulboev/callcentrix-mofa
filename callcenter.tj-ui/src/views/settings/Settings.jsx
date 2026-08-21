@@ -8,17 +8,22 @@ import { cilCloudUpload } from '@coreui/icons'
 import { useTranslation } from 'react-i18next'
 import useAuthStore from 'src/store/auth'
 import useBrandingStore from 'src/store/branding'
-import { users as usersApi, settings as settingsApi } from 'src/api'
+import { auth as authApi, settings as settingsApi } from 'src/api'
+
+const PASSWORD_ERROR_KEYS = {
+  invalid_current_password: 'settings.invalid_current_password',
+  password_too_short:       'settings.password_too_short',
+}
 
 export default function Settings() {
-  const user = useAuthStore((s) => s.user)
   const isSuperAdmin = useAuthStore((s) => s.isSuperAdmin())
   const { t } = useTranslation()
-  const [pwd,     setPwd]     = useState('')
-  const [confirm, setConfirm] = useState('')
-  const [error,   setError]   = useState('')
-  const [success, setSuccess] = useState('')
-  const [saving,  setSaving]  = useState(false)
+  const [current,  setCurrent]  = useState('')
+  const [pwd,      setPwd]      = useState('')
+  const [confirm,  setConfirm]  = useState('')
+  const [error,    setError]    = useState('')
+  const [success,  setSuccess]  = useState('')
+  const [saving,   setSaving]   = useState(false)
 
   const handleChangePwd = async (e) => {
     e.preventDefault()
@@ -27,11 +32,12 @@ export default function Settings() {
     setSaving(true)
     setError('')
     try {
-      await usersApi.resetPwd(user.id, pwd)
+      await authApi.changePassword(current, pwd)
       setSuccess(t('settings.password_updated'))
+      setCurrent('')
       setPwd('')
       setConfirm('')
-    } catch (e) { setError(e.message) }
+    } catch (e) { setError(t(PASSWORD_ERROR_KEYS[e.message] || 'settings.password_change_failed')) }
     finally { setSaving(false) }
   }
 
@@ -42,6 +48,7 @@ export default function Settings() {
       <div className="d-flex flex-column gap-4">
         {isSuperAdmin && <BrandingCard t={t} />}
         {isSuperAdmin && <SmppCard t={t} />}
+        {isSuperAdmin && <TelegramCard t={t} />}
 
         <CCard style={{ maxWidth: 480 }}>
           <CCardHeader>{t('settings.change_password')}</CCardHeader>
@@ -50,8 +57,14 @@ export default function Settings() {
             {success && <CAlert color="success" dismissible onClose={() => setSuccess('')}>{success}</CAlert>}
             <CForm onSubmit={handleChangePwd} className="d-flex flex-column gap-3">
               <div>
+                <CFormLabel>{t('settings.current_password')}</CFormLabel>
+                <CFormInput type="password" autoComplete="current-password"
+                  value={current} onChange={(e) => setCurrent(e.target.value)} required />
+              </div>
+              <div>
                 <CFormLabel>{t('settings.new_password')}</CFormLabel>
-                <CFormInput type="password" value={pwd} onChange={(e) => setPwd(e.target.value)} required />
+                <CFormInput type="password" autoComplete="new-password"
+                  value={pwd} onChange={(e) => setPwd(e.target.value)} required />
               </div>
               <div>
                 <CFormLabel>{t('settings.confirm_password')}</CFormLabel>
@@ -245,6 +258,62 @@ function SmppCard({ t }) {
             <div>
               <CFormLabel>{t('settings.smpp_sender_id')}</CFormLabel>
               <CFormInput value={senderId} onChange={(e) => setSenderId(e.target.value)} placeholder="CallCentrix" />
+            </div>
+            <CButton type="submit" color="primary" disabled={saving}>
+              {saving ? <CSpinner size="sm" /> : t('common.save')}
+            </CButton>
+          </CForm>
+        )}
+      </CCardBody>
+    </CCard>
+  )
+}
+
+function TelegramCard({ t }) {
+  const [botToken,    setBotToken]    = useState('')
+  const [hasBotToken, setHasBotToken] = useState(false)
+  const [loading, setLoading] = useState(true)
+  const [saving,  setSaving]  = useState(false)
+  const [error,   setError]   = useState('')
+  const [success, setSuccess] = useState('')
+
+  useEffect(() => {
+    settingsApi.telegram()
+      .then((s) => setHasBotToken(!!s.hasBotToken))
+      .catch((e) => setError(e.message))
+      .finally(() => setLoading(false))
+  }, [])
+
+  const handleSave = async (e) => {
+    e.preventDefault()
+    setSaving(true); setError(''); setSuccess('')
+    try {
+      await settingsApi.updateTelegram({ botToken })
+      setBotToken('')
+      setHasBotToken(hasBotToken || botToken !== '')
+      setSuccess(t('settings.telegram_saved'))
+    } catch (e) { setError(e.message) }
+    finally { setSaving(false) }
+  }
+
+  return (
+    <CCard style={{ maxWidth: 480 }}>
+      <CCardHeader>{t('settings.telegram_title')}</CCardHeader>
+      <CCardBody>
+        {error   && <CAlert color="danger"  dismissible onClose={() => setError('')}>{error}</CAlert>}
+        {success && <CAlert color="success" dismissible onClose={() => setSuccess('')}>{success}</CAlert>}
+
+        {loading ? <CSpinner size="sm" /> : (
+          <CForm onSubmit={handleSave} className="d-flex flex-column gap-3">
+            <div>
+              <CFormLabel>{t('settings.telegram_bot_token')}</CFormLabel>
+              <CFormInput
+                type="password"
+                value={botToken}
+                onChange={(e) => setBotToken(e.target.value)}
+                placeholder={hasBotToken ? '••••••' : '123456:ABC-DEF...'}
+              />
+              <div className="form-text">{t('settings.telegram_bot_token_hint')}</div>
             </div>
             <CButton type="submit" color="primary" disabled={saving}>
               {saving ? <CSpinner size="sm" /> : t('common.save')}

@@ -160,7 +160,7 @@ type smppSettingsResponse struct {
 func (h *SettingsHandler) GetSMPPSettings(w http.ResponseWriter, r *http.Request) {
 	var (
 		host, systemID, senderID, password string
-		port                                int
+		port                               int
 	)
 	err := h.DB.QueryRowContext(r.Context(),
 		`SELECT host, port, system_id, password, sender_id FROM smpp_settings WHERE id=1`,
@@ -204,6 +204,47 @@ func (h *SettingsHandler) UpdateSMPPSettings(w http.ResponseWriter, r *http.Requ
 			`UPDATE smpp_settings SET host=$1, port=$2, system_id=$3, password=$4, sender_id=$5, updated_at=NOW() WHERE id=1`,
 			body.Host, body.Port, body.SystemID, body.Password, body.SenderID)
 	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+type telegramSettingsResponse struct {
+	HasBotToken bool `json:"hasBotToken"`
+}
+
+// GetTelegramSettings reports whether a bot token is configured. SuperAdmin
+// only — never returns the token itself, mirroring GetSMPPSettings.
+func (h *SettingsHandler) GetTelegramSettings(w http.ResponseWriter, r *http.Request) {
+	var token string
+	err := h.DB.QueryRowContext(r.Context(),
+		`SELECT bot_token FROM telegram_settings WHERE id=1`,
+	).Scan(&token)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, telegramSettingsResponse{HasBotToken: token != ""})
+}
+
+// UpdateTelegramSettings saves the bot token. SuperAdmin only. An empty
+// token leaves the previously saved one untouched (same rule as SMPP password).
+func (h *SettingsHandler) UpdateTelegramSettings(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		BotToken string `json:"botToken"`
+	}
+	if err := decode(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid body")
+		return
+	}
+	if body.BotToken == "" {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	_, err := h.DB.ExecContext(r.Context(),
+		`UPDATE telegram_settings SET bot_token=$1, updated_at=NOW() WHERE id=1`, body.BotToken)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return

@@ -47,6 +47,8 @@ export const auth = {
   logout:     ()                   => post('/api/auth/logout'),
   register:   (data)               => post('/api/auth/register', data),
   verifyCode: (username, code)     => post('/api/auth/verify-code', { username, code }),
+  changePassword: (currentPassword, newPassword) =>
+    patch('/api/auth/password', { currentPassword, newPassword }),
 }
 
 // ─── Tenants ─────────────────────────────────────────────────
@@ -89,6 +91,20 @@ export const tickets = {
   assignableUsers: ()   => get('/api/tickets/assignable-users'),
 }
 
+// ─── Tasks ───────────────────────────────────────────────────
+export const tasks = {
+  list:            (params)     => get('/api/tasks' + toQuery(params)),
+  get:             (id)         => get(`/api/tasks/${id}`),
+  create:          (data)       => post('/api/tasks', data),
+  update:          (id, data)   => put(`/api/tasks/${id}`, data),
+  remove:          (id)         => del(`/api/tasks/${id}`),
+  updateStatus:    (id, status) => patch(`/api/tasks/${id}/status`, { status }),
+  assignableUsers: (tenantId)   => get('/api/tasks/assignable-users' + toQuery({ tenantId })),
+  notifications:            ()   => get('/api/tasks/notifications'),
+  markNotificationRead:     (id) => patch(`/api/tasks/notifications/${id}/read`),
+  markAllNotificationsRead: ()   => patch('/api/tasks/notifications/read-all'),
+}
+
 // ─── Reports ─────────────────────────────────────────────────
 export const reports = {
   tickets: (params) => get('/api/reports/tickets' + toQuery(params)),
@@ -121,6 +137,37 @@ export const topics = {
   create: (tenantId, data)      => post(`/api/tenants/${tenantId}/topics`, data),
   update: (tenantId, id, data)  => put(`/api/tenants/${tenantId}/topics/${id}`, data),
   remove: (tenantId, id)        => del(`/api/tenants/${tenantId}/topics/${id}`),
+}
+
+// ─── Knowledge Base ──────────────────────────────────────────
+export const knowledgeBase = {
+  categories:     (tenantId)   => get('/api/kb/categories' + toQuery({ tenantId })),
+  createCategory: (data)       => post('/api/kb/categories', data),
+  updateCategory: (id, data)   => put(`/api/kb/categories/${id}`, data),
+  removeCategory: (id)         => del(`/api/kb/categories/${id}`),
+  articles:       (params)     => get('/api/kb/articles' + toQuery(params)),
+  article:        (id)         => get(`/api/kb/articles/${id}`),
+  createArticle:  (data)       => post('/api/kb/articles', data),
+  updateArticle:  (id, data)   => put(`/api/kb/articles/${id}`, data),
+  removeArticle:  (id)         => del(`/api/kb/articles/${id}`),
+  tags:           (tenantId)   => get('/api/kb/tags' + toQuery({ tenantId })),
+  mediaUrl:       (articleId, mediaId) => `${BASE_URL}/api/kb/articles/${articleId}/media/${mediaId}?token=${getToken()}`,
+  // type: 'photo' | 'video'
+  uploadMedia:    (articleId, file, type) => {
+    const fd = new FormData()
+    fd.append('file', file)
+    fd.append('type', type)
+    const token = localStorage.getItem('accessToken')
+    return fetch(`${BASE_URL}/api/kb/articles/${articleId}/media`, {
+      method: 'POST',
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      body: fd,
+    }).then(async r => {
+      if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.error || r.statusText) }
+      return r.json()
+    })
+  },
+  removeMedia:    (articleId, mediaId) => del(`/api/kb/articles/${articleId}/media/${mediaId}`),
 }
 
 // ─── SIP Providers (carrier trunks) ────────────────────────────
@@ -158,6 +205,32 @@ export const ivr = {
     fd.append('file', file)
     const token = localStorage.getItem('accessToken')
     return fetch(`${BASE_URL}/api/kc-numbers/${kcId}/ivr/greeting`, {
+      method: 'POST',
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      body: fd,
+    }).then(async r => {
+      if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.error || r.statusText) }
+      return r.json()
+    })
+  },
+  uploadClosedGreeting: (kcId, file) => {
+    const fd = new FormData()
+    fd.append('file', file)
+    const token = localStorage.getItem('accessToken')
+    return fetch(`${BASE_URL}/api/kc-numbers/${kcId}/ivr/closed-greeting`, {
+      method: 'POST',
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      body: fd,
+    }).then(async r => {
+      if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.error || r.statusText) }
+      return r.json()
+    })
+  },
+  uploadMOH: (kcId, file) => {
+    const fd = new FormData()
+    fd.append('file', file)
+    const token = localStorage.getItem('accessToken')
+    return fetch(`${BASE_URL}/api/kc-numbers/${kcId}/ivr/moh`, {
       method: 'POST',
       headers: token ? { Authorization: `Bearer ${token}` } : {},
       body: fd,
@@ -215,6 +288,8 @@ export const settings = {
   },
   smpp:       ()     => get('/api/settings/smpp'),
   updateSmpp: (data) => put('/api/settings/smpp', data),
+  telegram:       ()     => get('/api/settings/telegram'),
+  updateTelegram: (data) => put('/api/settings/telegram', data),
 }
 
 // ─── Helpers ─────────────────────────────────────────────────

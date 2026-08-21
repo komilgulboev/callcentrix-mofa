@@ -1,11 +1,14 @@
 @echo off
-REM Builds backend (Go) and frontend (Vite), then packages both into cc_hosting_version/
-REM ready to copy to a server as-is. The backend serves the frontend itself (STATIC_DIR=./web
-REM by default), so cc_hosting_version/web must sit next to the executable.
+REM Builds backend (Go, for both Windows and Linux) and frontend (Vite), then packages
+REM everything into cc_hosting_version/ ready to copy to a server as-is. The backend serves
+REM the frontend itself (STATIC_DIR=./web by default), so cc_hosting_version/web must sit
+REM next to the executable.
 REM
 REM Usage:
-REM   build-hosting.bat        -> Windows backend (callcentrix.exe)
-REM   build-hosting.bat linux  -> Linux backend (callcentrix-linux)
+REM   build-hosting.bat        -> builds both callcentrix_mofa.exe (Windows) and
+REM                                callcentrix-linux (Linux/amd64)
+REM   build-hosting.bat win    -> builds only the Windows binary
+REM   build-hosting.bat linux  -> builds only the Linux binary
 
 setlocal
 
@@ -14,11 +17,14 @@ set BACKEND_DIR=%ROOT%callcentrix-backend
 set FRONTEND_DIR=%ROOT%callcenter.tj-ui
 set OUT_DIR=%ROOT%cc_hosting_version
 
-if /i "%~1"=="linux" (
-    set BINARY_NAME=callcentrix-linux
-) else (
-    set BINARY_NAME=callcentrix_mofa.exe
-)
+set WIN_BINARY=callcentrix_mofa.exe
+set LINUX_BINARY=callcentrix-linux
+
+set BUILD_WIN=1
+set BUILD_LINUX=1
+if /i "%~1"=="win" set BUILD_LINUX=0
+if /i "%~1"=="windows" set BUILD_LINUX=0
+if /i "%~1"=="linux" set BUILD_WIN=0
 
 for /f %%i in ('git rev-parse --short HEAD 2^>nul') do set GIT_COMMIT=%%i
 if "%GIT_COMMIT%"=="" set GIT_COMMIT=unknown
@@ -28,21 +34,38 @@ echo Build info: commit=%GIT_COMMIT% time=%BUILD_TIME%
 
 echo === Backend (Go) ===
 pushd "%BACKEND_DIR%"
-if /i "%~1"=="linux" (
+
+if "%BUILD_WIN%"=="1" (
+    echo Target platform: windows/amd64
+    set GOOS=windows
+    set GOARCH=amd64
+    go build -ldflags "%LDFLAGS%" -o %WIN_BINARY% ./cmd/server
+    if errorlevel 1 (
+        echo [ERROR] Windows backend build failed.
+        popd
+        exit /b 1
+    )
+    echo Backend built: %BACKEND_DIR%\%WIN_BINARY%
+)
+
+if "%BUILD_LINUX%"=="1" (
     echo Target platform: linux/amd64
     set GOOS=linux
     set GOARCH=amd64
-    go build -ldflags "%LDFLAGS%" -o %BINARY_NAME% ./cmd/server
-) else (
-    go build -ldflags "%LDFLAGS%" -o %BINARY_NAME% ./cmd/server
+    go build -ldflags "%LDFLAGS%" -o %LINUX_BINARY% ./cmd/server
+    if errorlevel 1 (
+        echo [ERROR] Linux backend build failed.
+        popd
+        exit /b 1
+    )
+    echo Backend built: %BACKEND_DIR%\%LINUX_BINARY%
 )
-if errorlevel 1 (
-    echo [ERROR] Backend build failed.
-    popd
-    exit /b 1
-)
+
+REM Reset cross-compile env vars so nothing downstream inherits them.
+set GOOS=
+set GOARCH=
+
 popd
-echo Backend built: %BACKEND_DIR%\%BINARY_NAME%
 
 echo.
 echo === Frontend (Vite) ===
@@ -71,12 +94,15 @@ if exist "%OUT_DIR%" rmdir /s /q "%OUT_DIR%"
 mkdir "%OUT_DIR%"
 mkdir "%OUT_DIR%\web"
 
-copy /y "%BACKEND_DIR%\%BINARY_NAME%" "%OUT_DIR%\%BINARY_NAME%" >nul
+if "%BUILD_WIN%"=="1" copy /y "%BACKEND_DIR%\%WIN_BINARY%" "%OUT_DIR%\%WIN_BINARY%" >nul
+if "%BUILD_LINUX%"=="1" copy /y "%BACKEND_DIR%\%LINUX_BINARY%" "%OUT_DIR%\%LINUX_BINARY%" >nul
 xcopy /e /i /y "%FRONTEND_DIR%\dist\*" "%OUT_DIR%\web\" >nul
 
 echo.
 echo Build finished successfully.
 echo Package ready in "%OUT_DIR%"
-echo NOTE: copy your .env file into "%OUT_DIR%" before running %BINARY_NAME% there.
+if "%BUILD_WIN%"=="1" echo   - %WIN_BINARY%    (Windows)
+if "%BUILD_LINUX%"=="1" echo   - %LINUX_BINARY%      (Linux/amd64, chmod +x before running)
+echo NOTE: copy your .env file into "%OUT_DIR%" before running the binary there.
 
 endlocal

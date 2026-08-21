@@ -235,7 +235,7 @@ function TicketEditModal({ ticketId, visible, onClose, onSaved }) {
           {t('phone.ticket_hash', { id: ticketId })}
           {ticket && (
             <CBadge color={TICKET_STATUS_COLOR[ticket.status] || 'secondary'} className="ms-2">
-              {ticket.status}
+              {t(`tickets.status_${ticket.status}`, { defaultValue: ticket.status })}
             </CBadge>
           )}
         </CModalTitle>
@@ -412,7 +412,10 @@ export default function Phone() {
     const today = new Date().toISOString().slice(0, 10)
     fetch(`${API_URL}/api/cdr?date_from=${today}&limit=500`, { headers: authHeaders() })
       .then(r => r.json())
-      .then(d => setCdrToday(d.records || []))
+      // 'h'/'i' are Asterisk's hangup/invalid-extension dialplan handlers, not
+      // real destinations — an explicit Hangup() in the tenant 'h' extension
+      // spawns a spurious zero-duration CDR row for them alongside the real call.
+      .then(d => setCdrToday((d.records || []).filter(c => c.dst !== 'h' && c.dst !== 'i')))
       .catch(() => {})
       .finally(() => setCdrLoading(false))
   }, [])
@@ -603,8 +606,8 @@ export default function Phone() {
                         <td className="text-muted small">
                           {t3.topic ? getTopicName(t3.topic, localStorage.getItem('ui-lang') || 'ru') : '—'}
                         </td>
-                        <td><CBadge color={TICKET_STATUS_COLOR[t3.status] || 'secondary'}>{t3.status}</CBadge></td>
-                        <td><CBadge color={PRIORITY_COLOR[t3.priority] || 'secondary'}>{t3.priority}</CBadge></td>
+                        <td><CBadge color={TICKET_STATUS_COLOR[t3.status] || 'secondary'}>{t(`tickets.status_${t3.status}`, { defaultValue: t3.status })}</CBadge></td>
+                        <td><CBadge color={PRIORITY_COLOR[t3.priority] || 'secondary'}>{t(`tickets.priority_${t3.priority}`, { defaultValue: t3.priority })}</CBadge></td>
                         <td className="text-muted small">{new Date(t3.createdAt).toLocaleString()}</td>
                         <td>
                           <div className="d-flex gap-1">
@@ -666,8 +669,22 @@ export default function Phone() {
                   </thead>
                   <tbody>
                     {cdrToday.map(c => {
-                      const isOutbound = c.src === user?.username
+                      // dcontext is where the call's *originating* channel ran its
+                      // dialplan: "tenant-{N}" only ever gets written for a tenant's
+                      // own agents (see asterisk.CreateTenantContext) — inbound calls
+                      // always land in a carrier/provider's own context instead (see
+                      // writeKCDialplan). Comparing src to the logged-in user's own
+                      // username used to get this backwards for inbound calls that
+                      // bridged to an agent, since a bridged call's own CDR row can
+                      // carry the agent's identifier in src/dst too.
+                      const isOutbound = (c.dcontext || '').startsWith('tenant-')
                       const callerNum  = isOutbound ? c.dst : c.src
+                      // Inbound calls get Answer()'d by the dialplan itself before
+                      // ever reaching a queue (to play the greeting/IVR/hold music),
+                      // so disposition alone reads ANSWERED even when no agent ever
+                      // picked up — agentConnected (from AMI BridgeEnter events, see
+                      // ami.Monitor / call_outcomes) is what's actually reliable here.
+                      const wasAnswered = isOutbound ? c.disposition === 'ANSWERED' : c.agentConnected
                       return (
                         <tr key={c.id}>
                           <td>
@@ -676,16 +693,19 @@ export default function Phone() {
                             </CBadge>
                           </td>
                           <td className="fw-semibold text-primary" style={{ cursor:'pointer' }}
-                            onClick={() => !inCall && setDial(callerNum)} title={t('phone.click_to_redial')}>
+                            onClick={() => !inCall && setDial(c.src)} title={t('phone.click_to_redial')}>
                             {c.src}
                           </td>
-                          <td className="text-muted">{c.dst}</td>
+                          <td className="fw-semibold text-primary" style={{ cursor:'pointer' }}
+                            onClick={() => !inCall && setDial(c.dst)} title={t('phone.click_to_redial')}>
+                            {c.dst}
+                          </td>
                           <td className="text-muted">{new Date(c.callDate).toLocaleTimeString()}</td>
                           <td>{c.billsec > 0 ? fmtDuration(c.billsec) : '—'}</td>
                           <td>{c.duration > 0 ? fmtDuration(c.duration) : '—'}</td>
                           <td>
-                            <CBadge color={c.disposition === 'ANSWERED' ? 'success' : 'danger'}>
-                              {c.disposition === 'ANSWERED' ? t('cdr.disposition_answered') : t('phone.missed')}
+                            <CBadge color={wasAnswered ? 'success' : 'danger'}>
+                              {wasAnswered ? t('cdr.disposition_answered') : t('phone.missed')}
                             </CBadge>
                           </td>
                           <td>
