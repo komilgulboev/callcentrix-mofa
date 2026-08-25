@@ -97,7 +97,7 @@ export default function KnowledgeBaseArticle() {
               aren't embedded inline. */}
           <div
             className="kb-article-body"
-            dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(article.body || '') }}
+            dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(kbApi.refreshMediaTokens(article.body || '')) }}
           />
           {(article.media || []).filter((m) => m.type === 'video').length > 0 && (
             <div className="d-flex flex-wrap gap-2 mt-3">

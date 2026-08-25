@@ -46,7 +46,7 @@ export default function KnowledgeBaseEditor() {
         setTitle(a.title)
         setCategoryId(a.categoryId ? String(a.categoryId) : '')
         setTagsText((a.tags || []).join(', '))
-        setBody(a.body || '')
+        setBody(kbApi.refreshMediaTokens(a.body || ''))
         setVideos((a.media || []).filter((m) => m.type === 'video'))
         setVisibleToAll(a.visibleToAll ?? true)
         setAllowedUserIds(a.allowedUserIds || [])

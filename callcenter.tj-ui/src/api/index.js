@@ -152,6 +152,20 @@ export const knowledgeBase = {
   removeArticle:  (id)         => del(`/api/kb/articles/${id}`),
   tags:           (tenantId)   => get('/api/kb/tags' + toQuery({ tenantId })),
   mediaUrl:       (articleId, mediaId) => `${BASE_URL}/api/kb/articles/${articleId}/media/${mediaId}?token=${getToken()}`,
+  // Inline photos are embedded as <img src="...media/{id}?token=..."> literally
+  // inside article.body HTML at upload time (see KnowledgeBaseEditor's
+  // imageHandler), so the token baked into that stored markup goes stale
+  // (tokens expire in ~1h) long before anyone views the article again. Swap
+  // in the viewer's current token whenever that HTML is about to be rendered
+  // so the images keep loading regardless of how old the saved token is.
+  refreshMediaTokens: (html) => {
+    const token = getToken()
+    if (!token) return html
+    return (html || '').replace(
+      /(\/api\/kb\/articles\/\d+\/media\/\d+\?token=)[^"'&]*/g,
+      (_, prefix) => prefix + encodeURIComponent(token),
+    )
+  },
   // type: 'photo' | 'video'
   uploadMedia:    (articleId, file, type) => {
     const fd = new FormData()
