@@ -119,6 +119,7 @@ func main() {
 	// its own if no bot token is configured yet, see RunTelegramBot.
 	go tasksH.RunTelegramBot()
 	topicsH := &handlers.TopicsHandler{DB: database}
+	sitesH := &handlers.SitesHandler{DB: database}
 	ivrH := &handlers.IVRHandler{DB: database, UploadsDir: cfg.UploadsDir}
 	kcNumbersH := &handlers.KCNumbersHandler{DB: database, AMI: amiRegistry}
 	providersH := &handlers.ProvidersHandler{DB: database, AMI: amiRegistry}
@@ -254,6 +255,7 @@ func main() {
 			r.Patch("/api/users/{id}/activate", usersH.Activate)
 			r.Patch("/api/users/{id}/deactivate", usersH.Deactivate)
 			r.Patch("/api/users/{id}/password", usersH.ResetPassword)
+			r.Post("/api/users/{id}/telegram-link-code", usersH.GenerateTelegramLinkCode)
 		})
 
 		// Topic Catalog — read for all, write for SuperAdmin + TenantAdmin
@@ -265,6 +267,20 @@ func main() {
 			r.Put("/api/tenants/{id}/topics/{topicId}", topicsH.Update)
 			r.Delete("/api/tenants/{id}/topics/{topicId}", topicsH.Delete)
 		})
+
+		// Site Catalog ("Сайты") — read for all, write for SuperAdmin + TenantAdmin
+		r.Get("/api/sites", sitesH.ListMy)
+		r.Group(func(r chi.Router) {
+			r.Use(mw.RequireRole(1))
+			r.Get("/api/tenants/{id}/sites", sitesH.List)
+			r.Post("/api/tenants/{id}/sites", sitesH.Create)
+			r.Put("/api/tenants/{id}/sites/{siteId}", sitesH.Update)
+			r.Delete("/api/tenants/{id}/sites/{siteId}", sitesH.Delete)
+		})
+
+		// Caller-name lookup by phone — all authenticated roles (webphone
+		// live-call display + ticket create/detail, see UsersHandler.LookupByPhone)
+		r.Get("/api/users/lookup-by-phone", usersH.LookupByPhone)
 
 		// Knowledge Base — categories read for all, write for SuperAdmin only;
 		// articles read for all (tenant-scoped, see ListArticles/GetArticle),
@@ -310,6 +326,8 @@ func main() {
 		r.Get("/api/tasks/notifications", tasksH.ListNotifications)
 		r.Patch("/api/tasks/notifications/{id}/read", tasksH.MarkNotificationRead)
 		r.Patch("/api/tasks/notifications/read-all", tasksH.MarkAllNotificationsRead)
+		r.Get("/api/tasks/{id}/comments", tasksH.ListTaskComments)
+		r.Post("/api/tasks/{id}/comments", tasksH.AddTaskComment)
 
 		r.Group(func(r chi.Router) {
 			r.Use(mw.RequireRole(1))
@@ -342,6 +360,7 @@ func main() {
 		r.Group(func(r chi.Router) {
 			r.Use(mw.RequireRole(2))
 			r.Get("/api/reports/tickets", reportsH.Tickets)
+		r.Get("/api/reports/tasks", reportsH.Tasks)
 		})
 
 		// Blacklist — SuperAdmin + TenantAdmin

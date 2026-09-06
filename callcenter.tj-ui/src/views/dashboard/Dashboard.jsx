@@ -9,7 +9,6 @@ import { useTranslation } from 'react-i18next'
 import { tickets, cdr, monitor as monitorApi, providers as providersApi } from 'src/api'
 import useAuthStore from 'src/store/auth'
 import { statusBadge, PROVIDER_STATUS_POLL_MS } from 'src/utils/providerStatus'
-import TasksBoard from './TasksBoard'
 
 const MONITOR_POLL_MS = 3000
 
@@ -338,12 +337,6 @@ export default function Dashboard() {
       <CRow className="g-3 mt-1">
         <CCol xl={12}>
           <WaitingCallersCard loading={loading} waitingCallers={waitingCallers} />
-        </CCol>
-      </CRow>
-
-      <CRow className="g-3 mt-1">
-        <CCol xl={12}>
-          <TasksBoard />
         </CCol>
       </CRow>
     </div>

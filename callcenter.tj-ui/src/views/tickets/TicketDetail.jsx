@@ -8,6 +8,7 @@ import CIcon from '@coreui/icons-react'
 import { cilArrowLeft, cilSend } from '@coreui/icons'
 import { useTranslation } from 'react-i18next'
 import { tickets as ticketsApi } from 'src/api'
+import { siteName } from 'src/views/sites/Sites'
 import useAuthStore from 'src/store/auth'
 
 const STATUS_COLOR = { new: 'primary', open: 'warning', pending: 'info', resolved: 'success', closed: 'secondary' }
@@ -17,7 +18,8 @@ export default function TicketDetail() {
   const { id }   = useParams()
   const navigate = useNavigate()
   const user     = useAuthStore((s) => s.user)
-  const { t }    = useTranslation()
+  const { t, i18n } = useTranslation()
+  const lang     = i18n.language
 
   const [ticket,   setTicket]   = useState(null)
   const [comments, setComments] = useState([])
@@ -159,7 +161,14 @@ export default function TicketDetail() {
               <div className="mb-2">
                 <span className="small text-muted">{t('ticket_detail.caller')}</span>
                 <div>{ticket.callerNo || '—'}</div>
+                {ticket.callerName && <div className="text-success small">{ticket.callerName}</div>}
               </div>
+              {ticket.site && (
+                <div className="mb-2">
+                  <span className="small text-muted">{t('ticket_detail.site')}</span>
+                  <div>{siteName(ticket.site, lang)}</div>
+                </div>
+              )}
               <div className="mb-2">
                 <span className="small text-muted">{t('ticket_detail.priority')}</span>
                 <div><CBadge color="info">{priorityLabel(ticket.priority)}</CBadge></div>

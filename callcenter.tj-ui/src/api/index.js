@@ -76,6 +76,8 @@ export const users = {
   resetPwd:         (id, pwd) => patch(`/api/users/${id}/password`, { password: pwd }),
   listUnauthorized: ()        => get('/api/users/unauthorized'),
   authorize:        (id)      => post(`/api/users/${id}/authorize`),
+  lookupByPhone:    (phone)   => get('/api/users/lookup-by-phone' + toQuery({ phone })),
+  telegramLinkCode: (id)      => post(`/api/users/${id}/telegram-link-code`),
 }
 
 // ─── Tickets ─────────────────────────────────────────────────
@@ -103,11 +105,14 @@ export const tasks = {
   notifications:            ()   => get('/api/tasks/notifications'),
   markNotificationRead:     (id) => patch(`/api/tasks/notifications/${id}/read`),
   markAllNotificationsRead: ()   => patch('/api/tasks/notifications/read-all'),
+  comments:        (id)        => get(`/api/tasks/${id}/comments`),
+  comment:         (id, text)  => post(`/api/tasks/${id}/comments`, { text }),
 }
 
 // ─── Reports ─────────────────────────────────────────────────
 export const reports = {
   tickets: (params) => get('/api/reports/tickets' + toQuery(params)),
+  tasks:   (params) => get('/api/reports/tasks' + toQuery(params)),
 }
 
 // ─── Blacklist ───────────────────────────────────────────────
@@ -137,6 +142,15 @@ export const topics = {
   create: (tenantId, data)      => post(`/api/tenants/${tenantId}/topics`, data),
   update: (tenantId, id, data)  => put(`/api/tenants/${tenantId}/topics/${id}`, data),
   remove: (tenantId, id)        => del(`/api/tenants/${tenantId}/topics/${id}`),
+}
+
+// ─── Sites ("Сайты") ─────────────────────────────────────────
+export const sites = {
+  my:     ()                    => get('/api/sites'),
+  list:   (tenantId)            => get(`/api/tenants/${tenantId}/sites`),
+  create: (tenantId, data)      => post(`/api/tenants/${tenantId}/sites`, data),
+  update: (tenantId, id, data)  => put(`/api/tenants/${tenantId}/sites/${id}`, data),
+  remove: (tenantId, id)        => del(`/api/tenants/${tenantId}/sites/${id}`),
 }
 
 // ─── Knowledge Base ──────────────────────────────────────────

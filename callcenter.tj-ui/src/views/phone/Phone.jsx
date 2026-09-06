@@ -14,7 +14,7 @@ import {
 import { useTranslation } from 'react-i18next'
 import usePhoneStore from 'src/store/phone'
 import useAuthStore from 'src/store/auth'
-import { topics as topicsApi } from 'src/api'
+import { topics as topicsApi, sites as sitesApi, users as usersApi } from 'src/api'
 
 const API_URL = import.meta.env.VITE_API_URL || window.location.origin
 
@@ -41,6 +41,11 @@ function getTopicName(topic, lang) {
   return topic.names[lang] || topic.names.ru || topic.names.tj || topic.names.en || '—'
 }
 
+function getSiteName(site, lang) {
+  if (!site?.names) return '—'
+  return site.names[lang] || site.names.ru || site.names.tj || site.names.en || '—'
+}
+
 const KEYPAD = [
   ['1',''],['2','ABC'],['3','DEF'],
   ['4','GHI'],['5','JKL'],['6','MNO'],
@@ -53,25 +58,32 @@ function authHeaders() {
 }
 
 // ─── Ticket Create Modal ──────────────────────────────────────
-function TicketCreateModal({ visible, onClose, callerNo, calleeNo, onCreated }) {
+function TicketCreateModal({ visible, onClose, callerNo, callerName, calleeNo, onCreated }) {
   const { t } = useTranslation()
   const lang = localStorage.getItem('ui-lang') || 'ru'
 
-  const [form, setForm]             = useState({ subject: '', body: '', priority: 'normal', status: 'new', topicId: '' })
+  const [form, setForm]             = useState({ subject: '', body: '', priority: 'normal', status: 'new', topicId: '', siteId: '' })
   const [saving, setSaving]         = useState(false)
   const [error, setError]           = useState('')
   const [topicsList, setTopicsList] = useState([])
   const [topicsLoading, setTopicsLoading] = useState(false)
+  const [sitesList, setSitesList]   = useState([])
+  const [sitesLoading, setSitesLoading] = useState(false)
 
   useEffect(() => {
     if (!visible) return
-    setForm({ subject: '', body: '', priority: 'normal', status: 'new', topicId: '' })
+    setForm({ subject: '', body: '', priority: 'normal', status: 'new', topicId: '', siteId: '' })
     setError('')
     setTopicsLoading(true)
     topicsApi.my()
       .then(d => setTopicsList(d.topics ?? []))
       .catch(() => setTopicsList([]))
       .finally(() => setTopicsLoading(false))
+    setSitesLoading(true)
+    sitesApi.my()
+      .then(d => setSitesList(d.sites ?? []))
+      .catch(() => setSitesList([]))
+      .finally(() => setSitesLoading(false))
   }, [visible])
 
   const handleSubmit = async () => {
@@ -84,6 +96,7 @@ function TicketCreateModal({ visible, onClose, callerNo, calleeNo, onCreated }) 
         priority: form.priority, status: form.status,
       }
       if (form.topicId) payload.topicId = parseInt(form.topicId)
+      if (form.siteId) payload.siteId = parseInt(form.siteId)
       const res = await fetch(`${API_URL}/api/tickets`, {
         method: 'POST', headers: authHeaders(),
         body: JSON.stringify(payload),
@@ -105,6 +118,7 @@ function TicketCreateModal({ visible, onClose, callerNo, calleeNo, onCreated }) 
             <CCol md={6}>
               <CFormLabel>{t('tickets.caller_number')}</CFormLabel>
               <CFormInput value={callerNo} readOnly className="bg-light" />
+              {callerName && <div className="text-success small mt-1">{callerName}</div>}
             </CCol>
             <CCol md={6}>
               <CFormLabel>{t('phone.extension')}</CFormLabel>
@@ -127,6 +141,25 @@ function TicketCreateModal({ visible, onClose, callerNo, calleeNo, onCreated }) 
               </CFormSelect>
               {!topicsLoading && topicsList.length === 0 && (
                 <div className="text-muted small mt-1">{t('phone.topics_empty_hint')}</div>
+              )}
+            </CCol>
+            <CCol xs={12}>
+              <CFormLabel>
+                {t('phone.call_site')}{' '}
+                {sitesLoading && <CSpinner size="sm" className="ms-1" />}
+              </CFormLabel>
+              <CFormSelect
+                value={form.siteId}
+                onChange={(e) => setForm(f => ({ ...f, siteId: e.target.value }))}
+                disabled={sitesLoading}
+              >
+                <option value="">{t('phone.no_site')}</option>
+                {sitesList.map(s => (
+                  <option key={s.id} value={s.id}>{getSiteName(s, lang)}</option>
+                ))}
+              </CFormSelect>
+              {!sitesLoading && sitesList.length === 0 && (
+                <div className="text-muted small mt-1">{t('phone.sites_empty_hint')}</div>
               )}
             </CCol>
             <CCol xs={12}>
@@ -271,6 +304,7 @@ function TicketEditModal({ ticketId, visible, onClose, onSaved }) {
                         <CCol md={6}>
                           <CFormLabel className="text-muted small">{t('tickets.caller_number')}</CFormLabel>
                           <CFormInput value={ticket.callerNo || '—'} readOnly className="bg-light" />
+                          {ticket.callerName && <div className="text-success small mt-1">{ticket.callerName}</div>}
                         </CCol>
                         <CCol md={6}>
                           <CFormLabel className="text-muted small">{t('phone.destination_number')}</CFormLabel>
@@ -380,12 +414,13 @@ export default function Phone() {
   const [callerTickets, setCallerTickets]   = useState([])
   const [ticketsLoading, setTicketsLoading] = useState(false)
   const [activeCallerNo, setActiveCallerNo] = useState('')
+  const [callerName, setCallerName]         = useState('')
   const [cdrToday, setCdrToday]             = useState([])
   const [cdrLoading, setCdrLoading]         = useState(false)
   const [ticketRefresh, setTicketRefresh]   = useState(0)
 
   const user = useAuthStore(s => s.user)
-  const { status, session, remoteNumber, callDuration, isMuted, call, answer, hangup, toggleMute, toggleHold, sendDtmf } = usePhoneStore()
+  const { status, session, remoteNumber, callDuration, isMuted, answering, call, answer, hangup, toggleMute, toggleHold, sendDtmf } = usePhoneStore()
 
   const inCall          = ['ringing_in','ringing_out','active','on_hold'].includes(status)
   const canCreateTicket = ['ringing_in','active','on_hold'].includes(status)
@@ -406,6 +441,18 @@ export default function Phone() {
       .catch(() => {})
       .finally(() => setTicketsLoading(false))
   }, [activeCallerNo, ticketRefresh])
+
+  // Shows the caller's name (matched against a self-registered citizen's
+  // phone, see UsersHandler.LookupByPhone) as soon as a number is known —
+  // before any ticket exists, so it's useful on the ringing/active call card too.
+  useEffect(() => {
+    if (!activeCallerNo) { setCallerName(''); return }
+    let cancelled = false
+    usersApi.lookupByPhone(activeCallerNo)
+      .then(d => { if (!cancelled) setCallerName(d.found ? [d.firstName, d.lastName].filter(Boolean).join(' ') : '') })
+      .catch(() => { if (!cancelled) setCallerName('') })
+    return () => { cancelled = true }
+  }, [activeCallerNo])
 
   const loadCDR = useCallback(() => {
     setCdrLoading(true)
@@ -458,9 +505,11 @@ export default function Phone() {
                 <div style={{ fontSize: 48 }}>📲</div>
                 <div className="text-muted mt-1">{t('phone.status_ringing_in')}</div>
                 <div className="fs-2 fw-bold my-2">{remoteNumber}</div>
+                {callerName && <div className="text-success fw-semibold mb-2">{callerName}</div>}
                 <div className="d-flex gap-3 justify-content-center mt-3">
-                  <CButton color="success" size="lg" onClick={answer} className="px-4">
-                    <CIcon icon={cilPhone} className="me-2" />{t('phone.answer')}
+                  <CButton color="success" size="lg" onClick={answer} className="px-4" disabled={answering}>
+                    {answering ? <CSpinner size="sm" className="me-2" /> : <CIcon icon={cilPhone} className="me-2" />}
+                    {t('phone.answer')}
                   </CButton>
                   <CButton color="danger" size="lg" onClick={hangup} className="px-4">
                     <CIcon icon={cilMediaStop} className="me-2" />{t('phone.decline')}
@@ -477,6 +526,7 @@ export default function Phone() {
                   {status === 'ringing_out' ? `⏳ ${t('phone.status_ringing_out')}` : status === 'on_hold' ? `⏸ ${t('phone.status_on_hold')}` : `🔊 ${t('phone.status_active')}`}
                 </div>
                 <div className="fs-2 fw-bold my-2">{remoteNumber}</div>
+                {callerName && <div className="text-success fw-semibold mb-1">{callerName}</div>}
                 {status === 'active' && <div className="fs-4 text-muted mb-3">{fmtDuration(callDuration)}</div>}
                 {reattached && (
                   <div className="text-warning small mb-3">
@@ -548,6 +598,7 @@ export default function Phone() {
               <span>
                 {t('phone.caller_tickets')}
                 {activeCallerNo && <strong className="ms-2 text-primary">{activeCallerNo}</strong>}
+                {callerName && <span className="ms-2 text-success">({callerName})</span>}
               </span>
               <div className="d-flex align-items-center gap-2">
                 <CBadge color={callerTickets.length > 0 ? 'warning' : 'secondary'}>{callerTickets.length}</CBadge>
@@ -669,15 +720,17 @@ export default function Phone() {
                   </thead>
                   <tbody>
                     {cdrToday.map(c => {
-                      // dcontext is where the call's *originating* channel ran its
-                      // dialplan: "tenant-{N}" only ever gets written for a tenant's
-                      // own agents (see asterisk.CreateTenantContext) — inbound calls
-                      // always land in a carrier/provider's own context instead (see
-                      // writeKCDialplan). Comparing src to the logged-in user's own
-                      // username used to get this backwards for inbound calls that
-                      // bridged to an agent, since a bridged call's own CDR row can
-                      // carry the agent's identifier in src/dst too.
-                      const isOutbound = (c.dcontext || '').startsWith('tenant-')
+                      // A provider trunk's PJSIP endpoint is always named
+                      // "provider-{id}" (see asterisk.ProviderEndpointID), so an
+                      // inbound caller's channel is "PJSIP/provider-{id}-xxxxxxxx"
+                      // while an agent's own channel is named after their username.
+                      // dcontext (the call's *current* dialplan location) used to
+                      // drive this instead, but it moves mid-call: when Asterisk
+                      // redirects a caller held on hold back to a reconnecting agent
+                      // (see PhoneHandler.ResumeCall), a genuinely inbound call's
+                      // dcontext flips to "tenant-{N}", same as a real outbound call.
+                      // channel is fixed for the life of that leg, so it can't drift.
+                      const isOutbound = !(c.channel || '').startsWith('PJSIP/provider-')
                       const callerNum  = isOutbound ? c.dst : c.src
                       // Inbound calls get Answer()'d by the dialplan itself before
                       // ever reaching a queue (to play the greeting/IVR/hold music),
@@ -731,6 +784,7 @@ export default function Phone() {
         visible={showCreateModal}
         onClose={() => setShowCreateModal(false)}
         callerNo={activeCallerNo}
+        callerName={callerName}
         calleeNo={user?.username || ''}
         onCreated={() => setTicketRefresh(k => k+1)}
       />

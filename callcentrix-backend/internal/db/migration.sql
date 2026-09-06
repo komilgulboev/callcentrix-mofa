@@ -68,10 +68,27 @@ CREATE TABLE IF NOT EXISTS topic_catalog (
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
+-- ─── Site Catalog ─────────────────────────────────────────────────────────────
+-- Same shape as topic_catalog — a per-tenant, admin-managed directory of
+-- government/service sites a ticket can be filed against, picked alongside
+-- (not instead of) the ticket's topic. See internal/handlers/sites.go.
+CREATE TABLE IF NOT EXISTS site_catalog (
+    id         SERIAL PRIMARY KEY,
+    tenant_id  INT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    names      JSONB NOT NULL DEFAULT '{}',  -- {"ru":"...","tj":"...","en":"..."}
+    active     BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_site_tenant ON site_catalog(tenant_id);
+
 ALTER TABLE tickets ADD COLUMN IF NOT EXISTS topic_id INT REFERENCES topic_catalog(id) ON DELETE SET NULL;
 -- The specialist (TenantAdmin/Supervisor) an operator has assigned this
 -- ticket to — distinct from user_id, which is whoever created/handled it.
 ALTER TABLE tickets ADD COLUMN IF NOT EXISTS assigned_user_id INT REFERENCES users(id) ON DELETE SET NULL;
+-- Which site_catalog entry (see above) this ticket is about — optional,
+-- independent of topic_id.
+ALTER TABLE tickets ADD COLUMN IF NOT EXISTS site_id INT REFERENCES site_catalog(id) ON DELETE SET NULL;
 
 -- ─── Tasks (Dashboard Kanban) ─────────────────────────────────────────────────
 -- Internal work-item tracking, distinct from Tickets (customer-issue
@@ -103,6 +120,28 @@ CREATE TABLE IF NOT EXISTS task_assignees (
 CREATE INDEX IF NOT EXISTS idx_task_assignees_user ON task_assignees(user_id);
 -- At most one primary per task.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_task_assignees_one_primary ON task_assignees(task_id) WHERE is_primary;
+
+-- Who actually moved a task to "resolved", and when — set by
+-- TasksHandler.updateTaskStatus, cleared again if the task is later reopened
+-- (moved to any other status), so a task in a non-resolved state never shows
+-- stale completion info. Powers the "which tasks were completed by whom"
+-- report (see ReportsHandler.Tasks) — status/updated_at alone can't answer
+-- that once a task has several assignees.
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS resolved_by INT REFERENCES users(id) ON DELETE SET NULL;
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS resolved_at TIMESTAMPTZ;
+
+-- Comments on a task — same shape and purpose as ticket_comments, gated the
+-- same way (see TasksHandler's canAccessTask): a running progress log a
+-- Supervisor can read (and add to) for any task in their tenant, not just
+-- ones assigned to them.
+CREATE TABLE IF NOT EXISTS task_comments (
+    id         SERIAL PRIMARY KEY,
+    task_id    INT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    user_id    INT REFERENCES users(id) ON DELETE SET NULL,
+    username   VARCHAR(100) DEFAULT '',
+    text       TEXT NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
 
 -- One-time backfill: migrate the old single-assignee column into the new
 -- many-assignees model (as that task's primary, since it was previously the
@@ -181,6 +220,17 @@ WHERE app = 'GotoIf' AND appdata = '$["${GOSUB_RETVAL}" = "0"]?blocked,s,1';
 -- change. Safe to rerun: matches 0 rows once applied.
 UPDATE ast_extensions SET app = 'NoOp'
 WHERE context LIKE 'tenant-%' AND exten = 'h' AND priority = 1 AND app = 'Hangup';
+
+-- One-time cleanup: a stray '_XXXXXXXXX' (exactly 9 digits) extension found
+-- in a tenant context, predating this codebase — no version of
+-- CreateTenantContext has ever written this pattern (only '_X.', 'i', 'h',
+-- '_9X.', see sip.go). It's not just dead weight: since it has no trailing
+-- '.' wildcard, Asterisk treats it as *more specific* than '_X.' and prefers
+-- it for any 9-digit dial — including a self-registered citizen's own
+-- username (their phone number, always 9 digits, see RegistrationHandler),
+-- which would hijack an internal SIP dial to that user out to the PSTN trunk
+-- instead of ringing them directly. Safe to rerun: matches 0 rows once applied.
+DELETE FROM ast_extensions WHERE exten = '_XXXXXXXXX';
 
 -- ─── Whitelist (phone numbers) ───────────────────────────────────────────────
 -- Opt-in default-deny gate, per KC number (see ivr_configs.whitelist_enabled
@@ -419,9 +469,7 @@ CREATE TABLE IF NOT EXISTS smpp_settings (
 );
 INSERT INTO smpp_settings (id) VALUES (1) ON CONFLICT (id) DO NOTHING;
 
--- Single-row Telegram bot config (same pattern as smpp_settings). Outbound
--- notifications only — no getUpdates polling/bot-linking flow — chat IDs are
--- entered manually per-user (see users.telegram_chat_id below).
+-- Single-row Telegram bot config (same pattern as smpp_settings).
 CREATE TABLE IF NOT EXISTS telegram_settings (
     id         INT PRIMARY KEY DEFAULT 1,
     bot_token  VARCHAR(255) NOT NULL DEFAULT '',
@@ -435,9 +483,30 @@ INSERT INTO telegram_settings (id) VALUES (1) ON CONFLICT (id) DO NOTHING;
 -- already-handled task-status button presses.
 ALTER TABLE telegram_settings ADD COLUMN IF NOT EXISTS update_offset INT NOT NULL DEFAULT 0;
 
--- Manually entered by SuperAdmin/TenantAdmin on the user's create/edit form —
--- targets Telegram task-assignment/status-change notifications at this user.
+-- Targets Telegram task-assignment/status-change notifications at this user.
+-- Set two ways: the self-service linking flow (see telegram_link_codes below
+-- and handlers.HandleTelegramMessage — the recommended path, since it reads
+-- the chat id straight from Telegram rather than trusting anyone to type it
+-- correctly) or, as a fallback, typed directly on the user's create/edit form
+-- (checkTelegramChatIDAvailable rejects a value already claimed by another
+-- user either way — a shared/duplicated chat id is how one operator used to
+-- end up receiving every other operator's notifications too).
 ALTER TABLE users ADD COLUMN IF NOT EXISTS telegram_chat_id VARCHAR(64) DEFAULT '';
+
+-- One-time codes for the self-service "link my Telegram" flow: a user
+-- requests a code in the app (UsersHandler.GenerateTelegramLinkCode), then
+-- sends it to the bot as "/start <code>" (or follows a t.me/<bot>?start=
+-- deep link, which does the same thing automatically) from their own
+-- Telegram account. handlers.HandleTelegramMessage resolves the code back to
+-- this user and records *that* chat id — the only step that used to be done
+-- by hand, copy-pasting a numeric id an admin had no reliable way to verify
+-- actually belonged to that person.
+CREATE TABLE IF NOT EXISTS telegram_link_codes (
+    code       VARCHAR(16) PRIMARY KEY,
+    user_id    INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    expires_at TIMESTAMPTZ NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
 
 -- ─── Asterisk Servers (multi-box telephony, single shared DB) ───────────────
 -- One row per physical Asterisk box. Users are assigned to a server

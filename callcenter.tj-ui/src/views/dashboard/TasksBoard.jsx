@@ -8,9 +8,10 @@ import {
   CCard, CCardHeader, CCardBody, CButton, CBadge, CSpinner, CAlert,
   CModal, CModalHeader, CModalTitle, CModalBody, CModalFooter,
   CForm, CFormInput, CFormLabel, CFormTextarea, CFormSelect, CFormCheck,
+  CInputGroup, CInputGroupText,
 } from '@coreui/react'
 import CIcon from '@coreui/icons-react'
-import { cilPlus, cilPencil } from '@coreui/icons'
+import { cilPlus, cilPencil, cilSearch } from '@coreui/icons'
 import { useTranslation } from 'react-i18next'
 import { tasks as tasksApi, tenants as tenantsApi } from 'src/api'
 import useAuthStore from 'src/store/auth'
@@ -24,7 +25,7 @@ const COLUMNS = [
   { key: 'resolved',    labelKey: 'tasks.status_resolved' },
 ]
 
-function TaskCard({ task, canManage, onEdit }) {
+function TaskCard({ task, canManage, onEdit, onOpen }) {
   const { t } = useTranslation()
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({ id: String(task.id) })
   const style = {
@@ -39,11 +40,14 @@ function TaskCard({ task, canManage, onEdit }) {
       {...listeners}
       {...attributes}
       className="p-2 mb-2 border rounded bg-body-tertiary"
+      role="button"
+      onClick={() => onOpen(task)}
     >
       <div className="d-flex justify-content-between align-items-start gap-2">
         <div className="fw-semibold small">{task.title}</div>
         {canManage && (
-          <CButton size="sm" color="light" className="p-1 lh-1" onClick={() => onEdit(task)}>
+          <CButton size="sm" color="light" className="p-1 lh-1"
+            onClick={(e) => { e.stopPropagation(); onEdit(task) }}>
             <CIcon icon={cilPencil} size="sm" />
           </CButton>
         )}
@@ -60,18 +64,16 @@ function TaskCard({ task, canManage, onEdit }) {
         </div>
       )}
       <div className="mt-2 small text-muted">
-        {canManage ? t('tasks.assigned_to') : t('tasks.created_by')}:{' '}
+        {t('tasks.assigned_to')}:{' '}
         <strong>
-          {canManage
-            ? (task.assignees || []).map((a) => (a.isPrimary ? `★ ${a.name}` : a.name)).join(', ') || '—'
-            : task.creatorName || '—'}
+          {(task.assignees || []).map((a) => (a.isPrimary ? `★ ${a.name}` : a.name)).join(', ') || '—'}
         </strong>
       </div>
     </div>
   )
 }
 
-function TaskColumn({ column, columnTasks, canManage, onEdit }) {
+function TaskColumn({ column, columnTasks, canManage, onEdit, onOpen }) {
   const { t } = useTranslation()
   const { setNodeRef, isOver } = useDroppable({ id: column.key })
 
@@ -83,7 +85,7 @@ function TaskColumn({ column, columnTasks, canManage, onEdit }) {
       </CCardHeader>
       <CCardBody ref={setNodeRef} style={{ minHeight: 120 }}>
         {columnTasks.map((task) => (
-          <TaskCard key={task.id} task={task} canManage={canManage} onEdit={onEdit} />
+          <TaskCard key={task.id} task={task} canManage={canManage} onEdit={onEdit} onOpen={onOpen} />
         ))}
         {!columnTasks.length && (
           <div className="text-muted small text-center py-3">{t('tasks.no_tasks')}</div>
@@ -260,6 +262,100 @@ function TaskModal({ visible, task, onClose, onSaved }) {
   )
 }
 
+// Read-only task detail: progress (who/when created, who/when resolved) plus
+// the comment thread — this is what a Supervisor opens after searching for a
+// task to check in on work they aren't personally assigned to (see
+// canAccessTask on the backend, which now allows exactly this). Anyone who
+// can see the task may also add a comment, not just its assignees.
+function TaskDetailModal({ task, visible, onClose }) {
+  const { t } = useTranslation()
+  const [comments, setComments] = useState([])
+  const [loadingComments, setLoadingComments] = useState(false)
+  const [newComment, setNewComment] = useState('')
+  const [posting, setPosting] = useState(false)
+  const [error, setError] = useState('')
+
+  const loadComments = useCallback(() => {
+    if (!task) return
+    setLoadingComments(true)
+    tasksApi.comments(task.id)
+      .then((d) => setComments(d.comments || []))
+      .catch(() => {})
+      .finally(() => setLoadingComments(false))
+  }, [task])
+
+  useEffect(() => {
+    if (visible && task) { setNewComment(''); setError(''); loadComments() }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visible, task?.id])
+
+  const handlePost = async () => {
+    if (!newComment.trim() || !task) return
+    setPosting(true)
+    setError('')
+    try {
+      await tasksApi.comment(task.id, newComment.trim())
+      setNewComment('')
+      loadComments()
+    } catch (e) { setError(e.message) }
+    finally { setPosting(false) }
+  }
+
+  if (!task) return null
+
+  return (
+    <CModal visible={visible} onClose={onClose} size="lg">
+      <CModalHeader>
+        <CModalTitle>{task.title}</CModalTitle>
+      </CModalHeader>
+      <CModalBody>
+        <div className="d-flex flex-wrap gap-3 mb-3 small text-muted">
+          <div>{t('tasks.col_status')}: <strong className="text-body">{t(`tasks.status_${task.status}`)}</strong></div>
+          <div>{t('tasks.created_by')}: <strong className="text-body">{task.creatorName || '—'}</strong></div>
+          <div>{t('tasks.assigned_to')}: <strong className="text-body">
+            {(task.assignees || []).map((a) => (a.isPrimary ? `★ ${a.name}` : a.name)).join(', ') || '—'}
+          </strong></div>
+          <div>{t('tasks.col_created')}: <strong className="text-body">{new Date(task.createdAt).toLocaleString()}</strong></div>
+          {task.resolvedAt && (
+            <div>{t('tasks.resolved_by')}: <strong className="text-body">
+              {task.resolvedByName || '—'} ({new Date(task.resolvedAt).toLocaleString()})
+            </strong></div>
+          )}
+        </div>
+        {task.description && <p>{task.description}</p>}
+
+        <hr />
+        <div className="fw-semibold small mb-2">{t('tasks.comments_title')}</div>
+        {error && <CAlert color="danger" dismissible onClose={() => setError('')}>{error}</CAlert>}
+        {loadingComments ? (
+          <div className="text-center py-3"><CSpinner size="sm" /></div>
+        ) : (
+          <div className="d-flex flex-column gap-2 mb-3" style={{ maxHeight: 240, overflowY: 'auto' }}>
+            {comments.map((cm) => (
+              <div key={cm.id} className="border rounded p-2 small">
+                <div className="d-flex justify-content-between gap-2">
+                  <strong>{cm.username}</strong>
+                  <span className="text-muted">{new Date(cm.createdAt).toLocaleString()}</span>
+                </div>
+                <div className="mt-1">{cm.text}</div>
+              </div>
+            ))}
+            {!comments.length && <div className="text-muted small">{t('tasks.no_comments')}</div>}
+          </div>
+        )}
+        <CFormTextarea rows={2} placeholder={t('tasks.comment_placeholder')} value={newComment}
+          onChange={(e) => setNewComment(e.target.value)} />
+      </CModalBody>
+      <CModalFooter>
+        <CButton color="secondary" onClick={onClose}>{t('common.close')}</CButton>
+        <CButton color="primary" onClick={handlePost} disabled={posting || !newComment.trim()}>
+          {posting ? <CSpinner size="sm" /> : t('tasks.add_comment')}
+        </CButton>
+      </CModalFooter>
+    </CModal>
+  )
+}
+
 export default function TasksBoard() {
   const { t } = useTranslation()
   const isSuperAdmin  = useAuthStore((s) => s.isSuperAdmin())
@@ -271,13 +367,23 @@ export default function TasksBoard() {
   const [error,    setError]    = useState('')
   const [modalOpen,   setModalOpen]   = useState(false)
   const [editingTask, setEditingTask] = useState(null)
+  const [detailTask,  setDetailTask]  = useState(null)
+  const [searchInput, setSearchInput] = useState('')
+  const [search,      setSearch]      = useState('')
   // Task ids with an in-flight status PATCH — the next poll tick must keep
   // showing their optimistic (dropped-into) column instead of overwriting it
   // with the pre-drag snapshot the server may still return mid-flight.
   const pendingRef = useRef(new Set())
 
+  // Debounce: apply the typed search 400ms after the user stops typing,
+  // rather than a request per keystroke.
+  useEffect(() => {
+    const timer = setTimeout(() => setSearch(searchInput.trim()), 400)
+    return () => clearTimeout(timer)
+  }, [searchInput])
+
   const load = useCallback(() => {
-    tasksApi.list()
+    tasksApi.list({ search: search || undefined })
       .then((d) => {
         const fresh = d.tasks || []
         setTaskList((prev) => {
@@ -288,7 +394,7 @@ export default function TasksBoard() {
       })
       .catch(() => setError(t('tasks.load_failed')))
       .finally(() => setLoading(false))
-  }, [t])
+  }, [t, search])
 
   useEffect(() => {
     load()
@@ -320,16 +426,24 @@ export default function TasksBoard() {
   const openCreate = () => { setEditingTask(null); setModalOpen(true) }
   const openEdit   = (task) => { setEditingTask(task); setModalOpen(true) }
   const handleSaved = () => { setModalOpen(false); load() }
+  const openDetail  = (task) => setDetailTask(task)
 
   return (
     <CCard>
-      <CCardHeader className="d-flex justify-content-between align-items-center">
+      <CCardHeader className="d-flex justify-content-between align-items-center flex-wrap gap-2">
         <span>{t('tasks.title')}</span>
-        {canManage && (
-          <CButton size="sm" color="primary" onClick={openCreate}>
-            <CIcon icon={cilPlus} className="me-1" />{t('tasks.new_task')}
-          </CButton>
-        )}
+        <div className="d-flex align-items-center gap-2">
+          <CInputGroup style={{ width: 220 }}>
+            <CInputGroupText><CIcon icon={cilSearch} /></CInputGroupText>
+            <CFormInput size="sm" placeholder={t('tasks.search_placeholder')}
+              value={searchInput} onChange={(e) => setSearchInput(e.target.value)} />
+          </CInputGroup>
+          {canManage && (
+            <CButton size="sm" color="primary" onClick={openCreate}>
+              <CIcon icon={cilPlus} className="me-1" />{t('tasks.new_task')}
+            </CButton>
+          )}
+        </div>
       </CCardHeader>
       <CCardBody>
         {error && <CAlert color="danger" dismissible onClose={() => setError('')}>{error}</CAlert>}
@@ -345,6 +459,7 @@ export default function TasksBoard() {
                     columnTasks={taskList.filter((tk) => tk.status === column.key)}
                     canManage={canManage}
                     onEdit={openEdit}
+                    onOpen={openDetail}
                   />
                 </div>
               ))}
@@ -356,6 +471,7 @@ export default function TasksBoard() {
       {modalOpen && (
         <TaskModal visible={modalOpen} task={editingTask} onClose={() => setModalOpen(false)} onSaved={handleSaved} />
       )}
+      <TaskDetailModal task={detailTask} visible={!!detailTask} onClose={() => setDetailTask(null)} />
     </CCard>
   )
 }

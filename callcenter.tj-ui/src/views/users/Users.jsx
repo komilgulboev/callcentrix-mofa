@@ -25,6 +25,9 @@ export default function Users() {
   const [form,           setForm]           = useState(EMPTY)
   const [saving,         setSaving]         = useState(false)
   const [sipExistsWarn,  setSipExistsWarn]  = useState(false)
+  const [linkCode,       setLinkCode]       = useState(null)
+  const [linkLoading,    setLinkLoading]    = useState(false)
+  const [linkError,      setLinkError]      = useState('')
   const currentUser = useAuthStore((s) => s.user)
   const navigate = useNavigate()
 
@@ -38,7 +41,11 @@ export default function Users() {
 
   useEffect(load, [])
 
-  const openCreate = () => { setEditing(null); setForm(EMPTY); setSipExistsWarn(false); setModal(true) }
+  const openCreate = () => {
+    setEditing(null); setForm(EMPTY); setSipExistsWarn(false)
+    setLinkCode(null); setLinkError('')
+    setModal(true)
+  }
   const openEdit   = (u) => {
     setEditing(u)
     setForm({
@@ -49,8 +56,43 @@ export default function Users() {
       lastName:  u.lastName ?? '',
       telegramChatId: u.telegramChatId ?? '',
     })
+    setLinkCode(null); setLinkError('')
     setModal(true)
   }
+
+  // Self-service Telegram linking: generates a one-time code (see
+  // GenerateTelegramLinkCode), then polls this user's own record until
+  // telegramChatId shows up — set by HandleTelegramMessage once they send
+  // the code to the bot themselves. Reading it straight from Telegram this
+  // way is what keeps every user's chat id correctly their own, instead of
+  // an admin having to type in a number nobody can verify.
+  const handleGetLinkCode = async () => {
+    if (!editing) return
+    setLinkLoading(true)
+    setLinkError('')
+    try {
+      const d = await usersApi.telegramLinkCode(editing.id)
+      setLinkCode(d)
+    } catch (e) {
+      setLinkError(e.message)
+    } finally {
+      setLinkLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    if (!linkCode || !editing) return
+    const timer = setInterval(async () => {
+      try {
+        const u = await usersApi.get(editing.id)
+        if (u.telegramChatId) {
+          setForm((f) => ({ ...f, telegramChatId: u.telegramChatId }))
+          setLinkCode(null)
+        }
+      } catch { /* keep polling silently */ }
+    }, 3000)
+    return () => clearInterval(timer)
+  }, [linkCode, editing])
 
   const handleSave = async () => {
     setSaving(true)
@@ -68,6 +110,8 @@ export default function Users() {
         setSipExistsWarn(true)
       } else if (e.message === 'username_exists') {
         setError(t('users.username_exists'))
+      } else if (e.message === 'telegram_chat_id_taken') {
+        setError(t('users.telegram_chat_id_taken'))
       } else {
         setError(e.message)
       }
@@ -264,6 +308,30 @@ export default function Users() {
                 onChange={(e) => setForm({ ...form, telegramChatId: e.target.value })}
                 placeholder="123456789" />
               <div className="form-text">{t('users.telegram_chat_id_hint')}</div>
+              {editing && (
+                <div className="mt-2">
+                  <CButton size="sm" color="info" variant="outline" onClick={handleGetLinkCode} disabled={linkLoading}>
+                    {linkLoading ? <CSpinner size="sm" className="me-1" /> : null}
+                    {linkLoading ? t('users.telegram_link_generating') : t('users.telegram_link_button')}
+                  </CButton>
+                  {linkError && <div className="text-danger small mt-1">{linkError}</div>}
+                  {linkCode && (
+                    <CAlert color="info" className="small mt-2 mb-0">
+                      <div>{t('users.telegram_link_instructions')}</div>
+                      <div className="fw-bold font-monospace my-1">/start {linkCode.code}</div>
+                      {linkCode.botUsername && (
+                        <a href={`https://t.me/${linkCode.botUsername}?start=${linkCode.code}`}
+                          target="_blank" rel="noreferrer">
+                          {t('users.telegram_link_open_bot')}
+                        </a>
+                      )}
+                      <div className="text-muted mt-1">
+                        {t('users.telegram_link_expires', { time: new Date(linkCode.expiresAt).toLocaleTimeString() })}
+                      </div>
+                    </CAlert>
+                  )}
+                </div>
+              )}
             </div>
           </CForm>
         </CModalBody>

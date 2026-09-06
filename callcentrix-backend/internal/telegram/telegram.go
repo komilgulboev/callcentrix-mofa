@@ -22,6 +22,16 @@ import (
 var httpClient = &http.Client{Timeout: 10 * time.Second}
 var pollClient = &http.Client{Timeout: 40 * time.Second}
 
+// stripURL discards the request URL from a transport-level *url.Error before
+// it's logged — that URL embeds the bot token (https://api.telegram.org/bot
+// <token>/...), so wrapping the raw error would leak it into logs.
+func stripURL(err error) error {
+	if uerr, ok := err.(*url.Error); ok {
+		return uerr.Err
+	}
+	return err
+}
+
 type InlineButton struct {
 	Text         string `json:"text"`
 	CallbackData string `json:"callback_data"`
@@ -72,6 +82,45 @@ func AnswerCallbackQuery(botToken, callbackQueryID, text string) error {
 	return post(botToken, "answerCallbackQuery", payload)
 }
 
+// GetMe returns the bot's own @username — used to build a clickable
+// t.me/<username>?start=<code> deep link for the account-linking flow (see
+// handlers.GenerateTelegramLinkCode). Best-effort: an empty string on any
+// failure just means the UI falls back to plain "send this code to the bot"
+// instructions instead of a clickable link.
+func GetMe(botToken string) (string, error) {
+	if botToken == "" {
+		return "", errors.New("telegram bot token is not configured")
+	}
+	apiURL := fmt.Sprintf("https://api.telegram.org/bot%s/getMe", botToken)
+	resp, err := httpClient.Get(apiURL)
+	if err != nil {
+		return "", fmt.Errorf("telegram getMe request: %w", stripURL(err))
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("telegram getMe read: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("telegram getMe returned status %d: %s", resp.StatusCode, body)
+	}
+
+	var parsed struct {
+		OK     bool `json:"ok"`
+		Result struct {
+			Username string `json:"username"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return "", fmt.Errorf("telegram getMe decode: %w", err)
+	}
+	if !parsed.OK {
+		return "", fmt.Errorf("telegram getMe not ok: %s", body)
+	}
+	return parsed.Result.Username, nil
+}
+
 func post(botToken, method string, payload any) error {
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -81,7 +130,7 @@ func post(botToken, method string, payload any) error {
 	apiURL := fmt.Sprintf("https://api.telegram.org/bot%s/%s", botToken, method)
 	resp, err := httpClient.Post(apiURL, "application/json", bytes.NewReader(body))
 	if err != nil {
-		return fmt.Errorf("telegram %s request: %w", method, err)
+		return fmt.Errorf("telegram %s request: %w", method, stripURL(err))
 	}
 	defer resp.Body.Close()
 
@@ -100,6 +149,10 @@ func post(botToken, method string, payload any) error {
 type Update struct {
 	UpdateID      int            `json:"update_id"`
 	CallbackQuery *CallbackQuery `json:"callback_query"`
+	// Message carries a plain (non-button) message sent straight to the bot —
+	// today just "/start <code>", the account-linking flow's second half (see
+	// handlers.HandleTelegramMessage). nil for every other update kind.
+	Message *TgMsg `json:"message"`
 }
 
 type CallbackQuery struct {
@@ -133,12 +186,12 @@ func GetUpdates(botToken string, offset, timeoutSec int) ([]Update, error) {
 	q := url.Values{}
 	q.Set("offset", fmt.Sprintf("%d", offset))
 	q.Set("timeout", fmt.Sprintf("%d", timeoutSec))
-	q.Set("allowed_updates", `["callback_query"]`)
+	q.Set("allowed_updates", `["callback_query","message"]`)
 
 	apiURL := fmt.Sprintf("https://api.telegram.org/bot%s/getUpdates?%s", botToken, q.Encode())
 	resp, err := pollClient.Get(apiURL)
 	if err != nil {
-		return nil, fmt.Errorf("telegram getUpdates request: %w", err)
+		return nil, fmt.Errorf("telegram getUpdates request: %w", stripURL(err))
 	}
 	defer resp.Body.Close()
 

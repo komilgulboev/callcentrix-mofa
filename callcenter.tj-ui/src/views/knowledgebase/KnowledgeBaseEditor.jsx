@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import {
   CAlert, CButton, CCard, CCardBody, CForm, CFormInput, CFormLabel,
@@ -7,10 +7,16 @@ import {
 import CIcon from '@coreui/icons-react'
 import { cilArrowLeft } from '@coreui/icons'
 import { useTranslation } from 'react-i18next'
-import ReactQuill from 'react-quill-new'
+import ReactQuill, { Quill } from 'react-quill-new'
 import 'react-quill-new/dist/quill.snow.css'
+import QuillTableBetter from 'quill-table-better'
+import 'quill-table-better/dist/quill-table-better.css'
 import { knowledgeBase as kbApi, tasks as tasksApi } from 'src/api'
 import { catName } from './KnowledgeBase'
+
+Quill.register({ 'modules/table-better': QuillTableBetter }, true)
+
+const TABLE_LANGUAGE_BY_LOCALE = { ru: 'ru_RU', tj: 'ru_RU', en: 'en_US' }
 
 export default function KnowledgeBaseEditor() {
   const { id } = useParams() // present once the article has been saved at least once
@@ -19,6 +25,13 @@ export default function KnowledgeBaseEditor() {
   const { t, i18n } = useTranslation()
   const editing = !!id
   const quillRef = useRef(null)
+  // Only an article that was already being edited when this component first
+  // mounted (opened straight from a /edit/:id URL) ever needs the one-time
+  // table-safe load below — captured once so a later "just created, redirect
+  // into edit mode" transition (component stays mounted, id merely appears)
+  // doesn't re-trigger it and duplicate whatever the admin just typed.
+  const needsInitialTableSafeLoadRef = useRef(editing)
+  const initialTableSafeLoadDoneRef = useRef(false)
 
   const [categories, setCategories] = useState([])
   const [title, setTitle] = useState('')
@@ -55,6 +68,26 @@ export default function KnowledgeBaseEditor() {
       .finally(() => setLoading(false))
   }, [id])
 
+  // quill-table-better's own docs warn that Quill's normal setContents()
+  // (what a controlled ReactQuill value prop uses under the hood) silently
+  // wipes any <table> in the HTML being loaded — the fix they document is to
+  // convert the HTML to a delta and apply it with updateContents() instead.
+  // So the editor below is uncontrolled (no value prop) and this effect does
+  // that conversion once, imperatively, the first time a fetched article's
+  // body becomes available. useLayoutEffect (not useEffect) so it runs
+  // before paint — otherwise the admin would see a flash of an empty editor.
+  useLayoutEffect(() => {
+    if (!needsInitialTableSafeLoadRef.current || initialTableSafeLoadDoneRef.current || !body) return
+    const quill = quillRef.current?.getEditor()
+    if (!quill) return
+    initialTableSafeLoadDoneRef.current = true
+    const delta = quill.clipboard.convert({ html: body })
+    const [range] = quill.selection.getRange()
+    quill.updateContents(delta, Quill.sources.USER)
+    quill.setSelection(delta.length() - (range?.length || 0), Quill.sources.SILENT)
+    quill.scrollSelectionIntoView()
+  }, [body])
+
   // Inline photos are uploaded through the same MinIO-backed media endpoint
   // as the video attachments below — the article just has to exist first
   // (an image needs an articleId to attach to), so on a brand-new article
@@ -90,13 +123,24 @@ export default function KnowledgeBaseEditor() {
       container: [
         [{ header: [1, 2, 3, false] }],
         ['bold', 'italic', 'underline', 'strike'],
+        [{ script: 'sub' }, { script: 'super' }],
         [{ list: 'ordered' }, { list: 'bullet' }],
-        ['blockquote', 'link', 'image'],
+        ['blockquote', 'code-block', 'link', 'image'],
+        ['table-better'],
         ['clean'],
       ],
       handlers: { image: imageHandler },
     },
-  }), [imageHandler])
+    table: false,
+    'table-better': {
+      language: TABLE_LANGUAGE_BY_LOCALE[i18n.language] || 'en_US',
+      menus: ['column', 'row', 'merge', 'table', 'cell', 'wrap', 'delete'],
+      toolbarTable: true,
+    },
+    keyboard: {
+      bindings: QuillTableBetter.keyboardBindings,
+    },
+  }), [imageHandler, i18n.language])
 
   const handleVideoChange = async (e) => {
     const file = e.target.files[0]
@@ -194,10 +238,9 @@ export default function KnowledgeBaseEditor() {
               <ReactQuill
                 ref={quillRef}
                 theme="snow"
-                value={body}
                 onChange={setBody}
                 modules={quillModules}
-                style={{ height: 320, marginBottom: 42 }}
+                style={{ height: 360, marginBottom: 42 }}
               />
               {!editing && (
                 <div className="text-muted small mt-1">{t('knowledge_base.media_hint_save_first')}</div>

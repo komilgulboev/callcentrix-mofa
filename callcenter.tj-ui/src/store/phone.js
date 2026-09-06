@@ -114,6 +114,13 @@ const usePhoneStore = create(
       ua: null,
       session: null,
       status: 'idle',       // idle | connecting | registered | ringing_in | ringing_out | active | on_hold | failed
+      // True from the moment answer() is invoked until the call is confirmed/
+      // ended/failed — guards against a second click (or an impatient
+      // double-click while getUserMedia/SDP negotiation is still in flight)
+      // calling session.answer() again, which throws INVALID_STATE_ERROR
+      // since JsSIP has already moved the session out of
+      // STATUS_WAITING_FOR_ANSWER after the first call.
+      answering: false,
       remoteNumber: '',
       callDuration: 0,
       // Wall-clock time the call was answered. Duration is always derived
@@ -212,14 +219,20 @@ const usePhoneStore = create(
       },
 
       answer() {
-        const { session } = get()
-        if (!session) return
+        const { session, answering } = get()
+        if (!session || answering) return
+        set({ answering: true })
         stopRingtone()
-        session.answer({
-          mediaConstraints: { audio: true, video: false },
-          sessionTimersExpires: 120,
-          pcConfig: PC_CONFIG,
-        })
+        try {
+          session.answer({
+            mediaConstraints: { audio: true, video: false },
+            sessionTimersExpires: 120,
+            pcConfig: PC_CONFIG,
+          })
+        } catch (err) {
+          console.error('[Phone] answer() failed:', err)
+          set({ answering: false })
+        }
       },
 
       hangup() {
@@ -303,7 +316,7 @@ const usePhoneStore = create(
       _bindSession(session, initialStatus, number) {
         const remote = number || session.remote_identity?.uri?.user || '?'
         const startedAt = Date.now()
-        set({ session, status: initialStatus, remoteNumber: remote, channel: null })
+        set({ session, status: initialStatus, remoteNumber: remote, channel: null, answering: false })
         if (initialStatus === 'ringing_in') startRingtone()
         if (initialStatus === 'ringing_out') startRingback()
 
@@ -374,6 +387,7 @@ const usePhoneStore = create(
           remoteNumber: '', callDuration: 0,
           isMuted: false, _timer: null,
           answeredAt: null, channel: null,
+          answering: false,
         })
       },
     }),

@@ -10,12 +10,13 @@ import {
 import CIcon from '@coreui/icons-react'
 import { cilPlus, cilSearch } from '@coreui/icons'
 import { useTranslation } from 'react-i18next'
-import { tickets as ticketsApi, topics as topicsApi } from 'src/api'
+import { tickets as ticketsApi, topics as topicsApi, sites as sitesApi, users as usersApi } from 'src/api'
 import { topicName } from 'src/views/topics/Topics'
+import { siteName } from 'src/views/sites/Sites'
 
 const STATUS_COLOR = { new: 'primary', open: 'warning', pending: 'info', resolved: 'success', closed: 'secondary' }
 const PRIORITY_COLOR = { low: 'secondary', normal: 'info', high: 'warning', urgent: 'danger' }
-const EMPTY = { subject: '', callerNo: '', body: '', priority: 'normal', status: 'new', topicId: '' }
+const EMPTY = { subject: '', callerNo: '', body: '', priority: 'normal', status: 'new', topicId: '', siteId: '' }
 
 export default function Tickets() {
   const { t, i18n } = useTranslation()
@@ -32,7 +33,24 @@ export default function Tickets() {
   const [topicFilter,  setTopicFilter]  = useState('')
   const [topicsList,   setTopicsList]   = useState([])
   const [topicsMap,    setTopicsMap]    = useState({})
+  const [sitesList,    setSitesList]    = useState([])
+  const [sitesMap,     setSitesMap]     = useState({})
+  const [callerNameHint, setCallerNameHint] = useState('')
   const navigate = useNavigate()
+
+  // Debounced live lookup while typing the caller's number in the create
+  // form — same match as TicketsHandler's callerNameJoin, just before a
+  // ticket exists to carry it. See UsersHandler.LookupByPhone.
+  useEffect(() => {
+    if (!form.callerNo.trim()) { setCallerNameHint(''); return }
+    let cancelled = false
+    const timer = setTimeout(() => {
+      usersApi.lookupByPhone(form.callerNo)
+        .then((d) => { if (!cancelled) setCallerNameHint(d.found ? [d.firstName, d.lastName].filter(Boolean).join(' ') : '') })
+        .catch(() => { if (!cancelled) setCallerNameHint('') })
+    }, 400)
+    return () => { cancelled = true; clearTimeout(timer) }
+  }, [form.callerNo])
 
   const loadTopics = () => {
     topicsApi.my()
@@ -42,6 +60,18 @@ export default function Tickets() {
         list.forEach((t) => { map[t.id] = t })
         setTopicsList(list)
         setTopicsMap(map)
+      })
+      .catch(() => {})
+  }
+
+  const loadSites = () => {
+    sitesApi.my()
+      .then((d) => {
+        const list = d.sites ?? []
+        const map = {}
+        list.forEach((s) => { map[s.id] = s })
+        setSitesList(list)
+        setSitesMap(map)
       })
       .catch(() => {})
   }
@@ -58,7 +88,7 @@ export default function Tickets() {
       .finally(() => setLoading(false))
   }
 
-  useEffect(() => { loadTopics() }, [])
+  useEffect(() => { loadTopics(); loadSites() }, [])
   useEffect(load, [statusFilter, topicFilter])
 
   const handleSearch = (e) => { e.preventDefault(); load() }
@@ -70,6 +100,7 @@ export default function Tickets() {
     try {
       const payload = { ...form }
       if (!payload.topicId) delete payload.topicId
+      if (!payload.siteId) delete payload.siteId
       await ticketsApi.create(payload)
       setModal(false)
       setForm(EMPTY)
@@ -81,6 +112,12 @@ export default function Tickets() {
   const getTopicLabel = (ticket) => {
     if (ticket.topic) return topicName(ticket.topic, lang)
     if (ticket.topicId && topicsMap[ticket.topicId]) return topicName(topicsMap[ticket.topicId], lang)
+    return '—'
+  }
+
+  const getSiteLabel = (ticket) => {
+    if (ticket.site) return siteName(ticket.site, lang)
+    if (ticket.siteId && sitesMap[ticket.siteId]) return siteName(sitesMap[ticket.siteId], lang)
     return '—'
   }
 
@@ -133,6 +170,7 @@ export default function Tickets() {
                   <CTableHeaderCell>#</CTableHeaderCell>
                   <CTableHeaderCell>{t('tickets.col_subject')}</CTableHeaderCell>
                   <CTableHeaderCell>{t('tickets.col_topic')}</CTableHeaderCell>
+                  <CTableHeaderCell>{t('tickets.col_site')}</CTableHeaderCell>
                   <CTableHeaderCell>{t('tickets.col_caller')}</CTableHeaderCell>
                   <CTableHeaderCell>{t('tickets.col_priority')}</CTableHeaderCell>
                   <CTableHeaderCell>{t('tickets.col_status')}</CTableHeaderCell>
@@ -145,7 +183,11 @@ export default function Tickets() {
                     <CTableDataCell className="text-muted">#{ticket.id}</CTableDataCell>
                     <CTableDataCell className="fw-semibold">{ticket.subject}</CTableDataCell>
                     <CTableDataCell className="text-muted small">{getTopicLabel(ticket)}</CTableDataCell>
-                    <CTableDataCell>{ticket.callerNo || '—'}</CTableDataCell>
+                    <CTableDataCell className="text-muted small">{getSiteLabel(ticket)}</CTableDataCell>
+                    <CTableDataCell>
+                      {ticket.callerNo || '—'}
+                      {ticket.callerName && <div className="text-success small">{ticket.callerName}</div>}
+                    </CTableDataCell>
                     <CTableDataCell>
                       <CBadge color={PRIORITY_COLOR[ticket.priority] ?? 'secondary'}>{priorityLabel(ticket.priority)}</CBadge>
                     </CTableDataCell>
@@ -159,7 +201,7 @@ export default function Tickets() {
                 ))}
                 {!rows.length && (
                   <CTableRow>
-                    <CTableDataCell colSpan={7} className="text-center text-muted py-4">{t('tickets.empty')}</CTableDataCell>
+                    <CTableDataCell colSpan={8} className="text-center text-muted py-4">{t('tickets.empty')}</CTableDataCell>
                   </CTableRow>
                 )}
               </CTableBody>
@@ -188,6 +230,7 @@ export default function Tickets() {
                   onChange={(e) => setForm({ ...form, callerNo: e.target.value })}
                   placeholder="+992…"
                 />
+                {callerNameHint && <div className="text-success small mt-1">{callerNameHint}</div>}
               </div>
               <div className="col">
                 <CFormLabel>{t('common.priority')}</CFormLabel>
@@ -206,6 +249,17 @@ export default function Tickets() {
                   <option value="">{t('tickets.no_topic')}</option>
                   {topicsList.map((tp) => (
                     <option key={tp.id} value={tp.id}>{topicName(tp, lang)}</option>
+                  ))}
+                </CFormSelect>
+              </div>
+            )}
+            {sitesList.length > 0 && (
+              <div>
+                <CFormLabel>{t('common.site')}</CFormLabel>
+                <CFormSelect value={form.siteId} onChange={(e) => setForm({ ...form, siteId: e.target.value })}>
+                  <option value="">{t('tickets.no_site')}</option>
+                  {sitesList.map((s) => (
+                    <option key={s.id} value={s.id}>{siteName(s, lang)}</option>
                   ))}
                 </CFormSelect>
               </div>

@@ -117,6 +117,10 @@ func (h *UsersHandler) Create(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, code)
 		return
 	}
+	if !checkTelegramChatIDAvailable(r.Context(), h.DB, body.TelegramChatID, 0) {
+		writeError(w, http.StatusConflict, "telegram_chat_id_taken")
+		return
+	}
 
 	hash, err := bcrypt.GenerateFromPassword([]byte(body.Password), bcrypt.DefaultCost)
 	if err != nil {
@@ -168,6 +172,10 @@ func (h *UsersHandler) Update(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := decode(r, &body); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid body")
+		return
+	}
+	if !checkTelegramChatIDAvailable(r.Context(), h.DB, body.TelegramChatID, id) {
+		writeError(w, http.StatusConflict, "telegram_chat_id_taken")
 		return
 	}
 
@@ -437,4 +445,47 @@ func (h *UsersHandler) Authorize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// LookupByPhone matches a caller's number against a self-registered citizen's
+// username/sip_no (which double as their phone, see RegistrationHandler),
+// ignoring +/00/country-code formatting differences — same normalization as
+// blacklist/whitelist matching (see normalizePhone in blacklist.go). Used by
+// the webphone to show a caller's name on an incoming/active call, and by
+// ticket create/detail (see TicketsHandler's callerNameJoin) once a ticket
+// exists. All authenticated roles — an operator needs this mid-call.
+// Non-SuperAdmin callers are scoped to their own tenant so an operator never
+// sees another tenant's citizens.
+func (h *UsersHandler) LookupByPhone(w http.ResponseWriter, r *http.Request) {
+	c := mw.GetClaims(r)
+	phone := r.URL.Query().Get("phone")
+	np := normalizePhone(phone)
+	if np == "" {
+		writeJSON(w, http.StatusOK, map[string]any{"found": false})
+		return
+	}
+
+	query := `SELECT first_name, last_name, username FROM users
+	          WHERE phone_verified = TRUE
+	            AND (regexp_replace(username,'\D','','g') = $1 OR regexp_replace(sip_no,'\D','','g') = $1)`
+	args := []any{np}
+	if c.UserType != 0 {
+		query += ` AND tenant_id = $2`
+		args = append(args, c.TenantID)
+	}
+	query += ` LIMIT 1`
+
+	var firstName, lastName, username string
+	err := h.DB.QueryRowContext(r.Context(), query, args...).Scan(&firstName, &lastName, &username)
+	if err == sql.ErrNoRows {
+		writeJSON(w, http.StatusOK, map[string]any{"found": false})
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"found": true, "firstName": firstName, "lastName": lastName, "username": username,
+	})
 }

@@ -80,3 +80,21 @@
   height: auto;
   border-radius: 6px;
 }
+
+// The rich-text editor (quill-table-better) lets admins insert tables, but
+// its border/spacing rules only target .ql-editor — mirror them here so
+// tables still look right once rendered read-only on the article page.
+.kb-article-body table {
+  border-collapse: collapse;
+  max-width: 100%;
+}
+
+.kb-article-body td,
+.kb-article-body th {
+  border: 1px solid #ccced1;
+  padding: 4px 8px;
+}
+
+.kb-article-body th {
+  background: rgba(0, 0, 0, 0.05);
+}

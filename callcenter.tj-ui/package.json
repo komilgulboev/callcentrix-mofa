@@ -17,6 +17,7 @@
     "dompurify": "^3.4.14",
     "i18next": "^26.3.4",
     "jssip": "^3.10.1",
+    "quill-table-better": "^1.2.3",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-i18next": "^17.0.8",

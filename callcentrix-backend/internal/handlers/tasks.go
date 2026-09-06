@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -19,16 +20,30 @@ import (
 type TasksHandler struct{ DB *sql.DB }
 
 type Task struct {
-	ID          int            `json:"id"`
-	TenantID    *int           `json:"tenantId"`
-	Title       string         `json:"title"`
-	Description string         `json:"description"`
-	Status      string         `json:"status"`
-	CreatedBy   *int           `json:"createdBy"`
-	CreatorName string         `json:"creatorName,omitempty"`
-	Assignees   []TaskAssignee `json:"assignees"`
-	CreatedAt   string         `json:"createdAt"`
-	UpdatedAt   string         `json:"updatedAt"`
+	ID             int            `json:"id"`
+	TenantID       *int           `json:"tenantId"`
+	Title          string         `json:"title"`
+	Description    string         `json:"description"`
+	Status         string         `json:"status"`
+	CreatedBy      *int           `json:"createdBy"`
+	CreatorName    string         `json:"creatorName,omitempty"`
+	Assignees      []TaskAssignee `json:"assignees"`
+	CreatedAt      string         `json:"createdAt"`
+	UpdatedAt      string         `json:"updatedAt"`
+	ResolvedBy     *int           `json:"resolvedBy"`
+	ResolvedByName string         `json:"resolvedByName,omitempty"`
+	ResolvedAt     *string        `json:"resolvedAt"`
+}
+
+// TaskComment is one entry in a task's progress/comment log — same shape as
+// TicketComment, gated by canAccessTask instead of canAccessTicket.
+type TaskComment struct {
+	ID        int    `json:"id"`
+	TaskID    int    `json:"taskId"`
+	UserID    *int   `json:"userId"`
+	Username  string `json:"username"`
+	Text      string `json:"text"`
+	CreatedAt string `json:"createdAt"`
 }
 
 // TaskAssignee is one row of task_assignees, with the user's display name
@@ -50,11 +65,14 @@ var validTaskStatuses = map[string]bool{
 	"todo": true, "in_progress": true, "waiting": true, "resolved": true,
 }
 
-// canAccessTask decides whether the caller may read/status-change a task.
-// SuperAdmin: always. TenantAdmin: same tenant. Supervisor/Operator: same
-// tenant AND they're one of the assignees — Tasks is a personal work queue
-// for those roles, unlike Tickets, where Supervisor/TenantAdmin see the
-// whole tenant.
+// canAccessTask decides whether the caller may read a task (and read/post
+// its comments — see ListTaskComments/AddTaskComment). SuperAdmin: always.
+// TenantAdmin/Supervisor: same tenant — Supervisors need to search and
+// monitor progress across the whole team, not just their own assignments.
+// Operator: same tenant AND they're one of the assignees — Tasks stays a
+// personal work queue for that role. Note this is READ access only; see
+// canChangeStatus for the separate, still assignee-only rule on actually
+// driving a task's status.
 func canAccessTask(c *jwt.Claims, tenantID *int, assignees []assigneeRef) bool {
 	if c.UserType == 0 {
 		return true
@@ -62,11 +80,21 @@ func canAccessTask(c *jwt.Claims, tenantID *int, assignees []assigneeRef) bool {
 	if c.TenantID == nil || tenantID == nil || *c.TenantID != *tenantID {
 		return false
 	}
-	if c.UserType == 1 {
+	if c.UserType <= 2 {
 		return true
 	}
 	for _, a := range assignees {
 		if a.UserID == c.Sub {
+			return true
+		}
+	}
+	return false
+}
+
+// isTaskAssignee reports whether userID is one of assignees.
+func isTaskAssignee(userID int, assignees []assigneeRef) bool {
+	for _, a := range assignees {
+		if a.UserID == userID {
 			return true
 		}
 	}
@@ -86,11 +114,18 @@ func primaryAssignee(assignees []assigneeRef) *int {
 
 // canChangeStatus applies the "only the primary assignee may change status"
 // rule — opt-in: with no primary designated (single assignee, or several
-// with none marked as primary), any assignee already cleared by
-// canAccessTask may act. Admins always may.
+// with none marked as primary), any assignee may act. Admins always may.
+// Deliberately stricter than canAccessTask: since that now lets a Supervisor
+// read/comment on any task in their tenant for oversight, this still
+// requires actually being an assignee before the primary-assignee check even
+// applies — otherwise a Supervisor merely browsing a task nobody assigned to
+// them could drive its status.
 func canChangeStatus(c *jwt.Claims, assignees []assigneeRef) bool {
 	if c.UserType <= 1 {
 		return true
+	}
+	if !isTaskAssignee(c.Sub, assignees) {
+		return false
 	}
 	if p := primaryAssignee(assignees); p != nil {
 		return *p == c.Sub
@@ -114,13 +149,16 @@ func (h *TasksHandler) List(w http.ResponseWriter, r *http.Request) {
 	c := mw.GetClaims(r)
 	q := r.URL.Query()
 	status := q.Get("status")
+	search := q.Get("search")
 
 	query := `SELECT t.id, t.tenant_id, t.title, t.description, t.status,
 	           t.created_by, COALESCE(NULLIF(TRIM(CONCAT(cu.first_name,' ',cu.last_name)), ''), cu.username),
 	           ` + assigneesJSONExpr + `,
-	           t.created_at, t.updated_at
+	           t.created_at, t.updated_at,
+	           t.resolved_by, COALESCE(NULLIF(TRIM(CONCAT(ru.first_name,' ',ru.last_name)), ''), ru.username), t.resolved_at
 	          FROM tasks t
 	          LEFT JOIN users cu ON cu.id = t.created_by
+	          LEFT JOIN users ru ON ru.id = t.resolved_by
 	          WHERE 1=1`
 	args := []any{}
 	n := 1
@@ -138,7 +176,10 @@ func (h *TasksHandler) List(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	if c.UserType == 2 || c.UserType == 3 {
+	// Operator: a personal work queue, assignments only. Supervisor and up
+	// see every task in their tenant (see canAccessTask) — a Supervisor needs
+	// to search and monitor the whole team's progress, not just their own.
+	if c.UserType == 3 {
 		query += ` AND EXISTS (SELECT 1 FROM task_assignees ta WHERE ta.task_id = t.id AND ta.user_id = $` + strconv.Itoa(n) + `)`
 		args = append(args, c.Sub)
 		n++
@@ -146,6 +187,11 @@ func (h *TasksHandler) List(w http.ResponseWriter, r *http.Request) {
 	if status != "" {
 		query += ` AND t.status = $` + strconv.Itoa(n)
 		args = append(args, status)
+		n++
+	}
+	if search != "" {
+		query += ` AND (t.title ILIKE $` + strconv.Itoa(n) + ` OR t.description ILIKE $` + strconv.Itoa(n) + `)`
+		args = append(args, "%"+search+"%")
 		n++
 	}
 	query += ` ORDER BY t.created_at DESC LIMIT 500`
@@ -160,13 +206,19 @@ func (h *TasksHandler) List(w http.ResponseWriter, r *http.Request) {
 	result := []Task{}
 	for rows.Next() {
 		var t Task
-		var creatorName sql.NullString
+		var creatorName, resolvedByName sql.NullString
 		var assigneesJSON []byte
+		var resolvedAt sql.NullString
 		if err := rows.Scan(&t.ID, &t.TenantID, &t.Title, &t.Description, &t.Status,
-			&t.CreatedBy, &creatorName, &assigneesJSON, &t.CreatedAt, &t.UpdatedAt); err != nil {
+			&t.CreatedBy, &creatorName, &assigneesJSON, &t.CreatedAt, &t.UpdatedAt,
+			&t.ResolvedBy, &resolvedByName, &resolvedAt); err != nil {
 			continue
 		}
 		t.CreatorName = creatorName.String
+		t.ResolvedByName = resolvedByName.String
+		if resolvedAt.Valid {
+			t.ResolvedAt = &resolvedAt.String
+		}
 		t.Assignees = []TaskAssignee{}
 		_ = json.Unmarshal(assigneesJSON, &t.Assignees)
 		result = append(result, t)
@@ -179,18 +231,22 @@ func (h *TasksHandler) Get(w http.ResponseWriter, r *http.Request) {
 	c := mw.GetClaims(r)
 
 	var t Task
-	var creatorName sql.NullString
+	var creatorName, resolvedByName sql.NullString
 	var assigneesJSON []byte
+	var resolvedAt sql.NullString
 	err := h.DB.QueryRowContext(r.Context(),
 		`SELECT t.id, t.tenant_id, t.title, t.description, t.status,
 		        t.created_by, COALESCE(NULLIF(TRIM(CONCAT(cu.first_name,' ',cu.last_name)), ''), cu.username),
 		        `+assigneesJSONExpr+`,
-		        t.created_at, t.updated_at
+		        t.created_at, t.updated_at,
+		        t.resolved_by, COALESCE(NULLIF(TRIM(CONCAT(ru.first_name,' ',ru.last_name)), ''), ru.username), t.resolved_at
 		 FROM tasks t
 		 LEFT JOIN users cu ON cu.id = t.created_by
+		 LEFT JOIN users ru ON ru.id = t.resolved_by
 		 WHERE t.id = $1`, id,
 	).Scan(&t.ID, &t.TenantID, &t.Title, &t.Description, &t.Status,
-		&t.CreatedBy, &creatorName, &assigneesJSON, &t.CreatedAt, &t.UpdatedAt)
+		&t.CreatedBy, &creatorName, &assigneesJSON, &t.CreatedAt, &t.UpdatedAt,
+		&t.ResolvedBy, &resolvedByName, &resolvedAt)
 	if err == sql.ErrNoRows {
 		writeError(w, http.StatusNotFound, "not found")
 		return
@@ -200,6 +256,10 @@ func (h *TasksHandler) Get(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	t.CreatorName = creatorName.String
+	t.ResolvedByName = resolvedByName.String
+	if resolvedAt.Valid {
+		t.ResolvedAt = &resolvedAt.String
+	}
 	t.Assignees = []TaskAssignee{}
 	_ = json.Unmarshal(assigneesJSON, &t.Assignees)
 
@@ -508,9 +568,21 @@ func (h *TasksHandler) UpdateStatus(w http.ResponseWriter, r *http.Request) {
 // shared work, not just the actor's. Callers must do their own authorization
 // check first (canAccessTask + canChangeStatus) — this does none.
 func (h *TasksHandler) updateTaskStatus(taskID, actorUserID int, createdBy *int, assignees []assigneeRef, newStatus string) error {
-	if _, err := h.DB.Exec(
-		`UPDATE tasks SET status=$1, updated_at=NOW() WHERE id=$2`, newStatus, taskID,
-	); err != nil {
+	// resolved_by/resolved_at record who actually completed the task and
+	// when (see migration.sql) — cleared again on any move away from
+	// "resolved" so reopening a task doesn't leave stale completion info
+	// behind for the tasks report (see ReportsHandler.Tasks).
+	var err error
+	if newStatus == "resolved" {
+		_, err = h.DB.Exec(
+			`UPDATE tasks SET status=$1, resolved_by=$2, resolved_at=NOW(), updated_at=NOW() WHERE id=$3`,
+			newStatus, actorUserID, taskID)
+	} else {
+		_, err = h.DB.Exec(
+			`UPDATE tasks SET status=$1, resolved_by=NULL, resolved_at=NULL, updated_at=NOW() WHERE id=$2`,
+			newStatus, taskID)
+	}
+	if err != nil {
 		return err
 	}
 
@@ -532,6 +604,101 @@ func (h *TasksHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// taskAccessRefs loads just enough of a task to run canAccessTask against,
+// for the comment endpoints below (which don't otherwise need the full row).
+func (h *TasksHandler) taskAccessRefs(ctx context.Context, id int) (tenantID *int, assignees []assigneeRef, err error) {
+	err = h.DB.QueryRowContext(ctx, `SELECT tenant_id FROM tasks WHERE id=$1`, id).Scan(&tenantID)
+	if err != nil {
+		return nil, nil, err
+	}
+	assignees, err = h.loadAssigneeRefs(id)
+	return tenantID, assignees, err
+}
+
+// ListTaskComments returns a task's progress log — the running comment
+// thread Supervisors read to check in on work they didn't do themselves
+// (see canAccessTask). Same shape/gating pattern as TicketsHandler's
+// ticket comments.
+func (h *TasksHandler) ListTaskComments(w http.ResponseWriter, r *http.Request) {
+	c := mw.GetClaims(r)
+	id, _ := strconv.Atoi(chi.URLParam(r, "id"))
+
+	tenantID, assignees, err := h.taskAccessRefs(r.Context(), id)
+	if err == sql.ErrNoRows {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if !canAccessTask(c, tenantID, assignees) {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+
+	rows, err := h.DB.QueryContext(r.Context(),
+		`SELECT id, task_id, user_id, username, text, created_at FROM task_comments
+		 WHERE task_id = $1 ORDER BY created_at ASC`, id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	defer rows.Close()
+
+	result := []TaskComment{}
+	for rows.Next() {
+		var tc TaskComment
+		if err := rows.Scan(&tc.ID, &tc.TaskID, &tc.UserID, &tc.Username, &tc.Text, &tc.CreatedAt); err != nil {
+			continue
+		}
+		result = append(result, tc)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"comments": result})
+}
+
+// AddTaskComment posts one entry to a task's progress log. Anyone who can
+// see the task (see canAccessTask) may comment on it — not just assignees —
+// so a Supervisor can leave feedback on work they're only monitoring.
+func (h *TasksHandler) AddTaskComment(w http.ResponseWriter, r *http.Request) {
+	c := mw.GetClaims(r)
+	taskID, _ := strconv.Atoi(chi.URLParam(r, "id"))
+
+	var body struct {
+		Text string `json:"text"`
+	}
+	if err := decode(r, &body); err != nil || body.Text == "" {
+		writeError(w, http.StatusBadRequest, "text required")
+		return
+	}
+
+	tenantID, assignees, err := h.taskAccessRefs(r.Context(), taskID)
+	if err == sql.ErrNoRows {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if !canAccessTask(c, tenantID, assignees) {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+
+	var id int
+	err = h.DB.QueryRowContext(r.Context(),
+		`INSERT INTO task_comments (task_id, user_id, username, text) VALUES ($1,$2,$3,$4) RETURNING id`,
+		taskID, c.Sub, c.Username, body.Text,
+	).Scan(&id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, map[string]int{"id": id})
 }
 
 type taskNotification struct {
@@ -718,10 +885,13 @@ func (h *TasksHandler) loadBotToken() string {
 
 // RunTelegramBot long-polls Telegram for inline-button presses on task
 // notification messages (see notifyAssignee) and applies the requested
-// status change. Runs for the process's lifetime; call as
-// `go tasksH.RunTelegramBot()`. The update offset is persisted in
-// telegram_settings so a restart doesn't replay already-handled button
-// presses.
+// status change, plus plain "/start <code>" messages for the account-linking
+// flow (see HandleTelegramMessage) — this is the one long-lived getUpdates
+// connection the backend keeps with Telegram, so both kinds of update have
+// to be dispatched from here rather than each running its own poller. Runs
+// for the process's lifetime; call as `go tasksH.RunTelegramBot()`. The
+// update offset is persisted in telegram_settings so a restart doesn't
+// replay already-handled button presses.
 func (h *TasksHandler) RunTelegramBot() {
 	offset := h.loadBotUpdateOffset()
 	for {
@@ -742,6 +912,9 @@ func (h *TasksHandler) RunTelegramBot() {
 			offset = u.UpdateID + 1
 			if u.CallbackQuery != nil {
 				h.handleTelegramCallback(token, u.CallbackQuery)
+			}
+			if u.Message != nil {
+				HandleTelegramMessage(h.DB, token, u.Message)
 			}
 		}
 		if len(updates) > 0 {

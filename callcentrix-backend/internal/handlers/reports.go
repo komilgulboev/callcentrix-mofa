@@ -139,6 +139,107 @@ func (h *ReportsHandler) Tickets(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"tickets": result})
 }
 
+// TaskReportRow is one line of the tasks report: the task plus who created
+// it, who it's assigned to, and — if resolved — who resolved it and when
+// (see tasks.resolved_by/resolved_at, set by TasksHandler.updateTaskStatus).
+type TaskReportRow struct {
+	ID         int     `json:"id"`
+	Title      string  `json:"title"`
+	Status     string  `json:"status"`
+	CreatedBy  string  `json:"createdBy"`
+	Assignees  string  `json:"assignees"`
+	ResolvedBy string  `json:"resolvedBy"`
+	ResolvedAt *string `json:"resolvedAt"`
+	CreatedAt  string  `json:"createdAt"`
+}
+
+// Tasks returns tasks created in a date range, optionally filtered by
+// status, for the "Отчёт по задачам" report — plus a statusCounts summary
+// over that same filtered set, so the page can show both the "how many of
+// each status" breakdown and the "which tasks, by whom" detail in one view.
+// Gated to Supervisor+ (see main.go), same level as the tickets report; a
+// Supervisor already has tenant-wide task visibility (see canAccessTask), so
+// this reuses that same tenant-wide scope rather than restricting to their
+// own assignments.
+func (h *ReportsHandler) Tasks(w http.ResponseWriter, r *http.Request) {
+	c := mw.GetClaims(r)
+	q := r.URL.Query()
+	dateFrom := q.Get("date_from")
+	dateTo := q.Get("date_to")
+	status := q.Get("status")
+
+	query := `SELECT t.id, t.title, t.status,
+	                 COALESCE(NULLIF(TRIM(CONCAT(cu.first_name,' ',cu.last_name)), ''), cu.username, ''),
+	                 COALESCE((
+	                   SELECT string_agg(COALESCE(NULLIF(TRIM(CONCAT(au.first_name,' ',au.last_name)), ''), au.username), ', ' ORDER BY au.first_name)
+	                   FROM task_assignees ta JOIN users au ON au.id = ta.user_id WHERE ta.task_id = t.id
+	                 ), ''),
+	                 COALESCE(NULLIF(TRIM(CONCAT(ru.first_name,' ',ru.last_name)), ''), ru.username, ''),
+	                 t.resolved_at, t.created_at
+	          FROM tasks t
+	          LEFT JOIN users cu ON cu.id = t.created_by
+	          LEFT JOIN users ru ON ru.id = t.resolved_by
+	          WHERE 1=1`
+	args := []any{}
+	n := 1
+
+	if c.UserType != 0 {
+		if c.TenantID == nil {
+			writeJSON(w, http.StatusOK, map[string]any{"tasks": []TaskReportRow{}, "statusCounts": map[string]int{}})
+			return
+		}
+		query += ` AND t.tenant_id = $` + strconv.Itoa(n)
+		args = append(args, *c.TenantID)
+		n++
+	} else if tidStr := q.Get("tenantId"); tidStr != "" {
+		if tid, err := strconv.Atoi(tidStr); err == nil && tid > 0 {
+			query += ` AND t.tenant_id = $` + strconv.Itoa(n)
+			args = append(args, tid)
+			n++
+		}
+	}
+	if dateFrom != "" {
+		query += ` AND t.created_at >= $` + strconv.Itoa(n)
+		args = append(args, dateFrom)
+		n++
+	}
+	if dateTo != "" {
+		query += ` AND t.created_at < ($` + strconv.Itoa(n) + `::date + interval '1 day')`
+		args = append(args, dateTo)
+		n++
+	}
+	if status != "" {
+		query += ` AND t.status = $` + strconv.Itoa(n)
+		args = append(args, status)
+		n++
+	}
+	query += ` ORDER BY t.created_at DESC LIMIT 1000`
+
+	rows, err := h.DB.QueryContext(r.Context(), query, args...)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	defer rows.Close()
+
+	result := []TaskReportRow{}
+	statusCounts := map[string]int{}
+	for rows.Next() {
+		var row TaskReportRow
+		var resolvedAt sql.NullString
+		if err := rows.Scan(&row.ID, &row.Title, &row.Status, &row.CreatedBy, &row.Assignees,
+			&row.ResolvedBy, &resolvedAt, &row.CreatedAt); err != nil {
+			continue
+		}
+		if resolvedAt.Valid {
+			row.ResolvedAt = &resolvedAt.String
+		}
+		statusCounts[row.Status]++
+		result = append(result, row)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"tasks": result, "statusCounts": statusCounts})
+}
+
 type cdrCandidate struct {
 	id       int
 	callDate time.Time

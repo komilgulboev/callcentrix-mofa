@@ -10,6 +10,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/minio/minio-go/v7"
+	"callcentrix/internal/jwt"
 	mw "callcentrix/internal/middleware"
 )
 
@@ -62,6 +63,58 @@ type CDRRecord struct {
 	AgentConnected bool `json:"agentConnected"`
 }
 
+// cdrScopeFilter returns a SQL "AND (...)" fragment (or "" for a SuperAdmin,
+// who is unrestricted) that scopes a query against ast_cdr — optionally
+// LEFT JOINed to call_outcomes, as every caller below does — to only the
+// calls c is allowed to see, plus the bind args it references. argN is the
+// next unused $N placeholder; nextArgN is what a caller should continue
+// numbering from afterwards.
+func cdrScopeFilter(c *jwt.Claims, argN int) (fragment string, args []any, nextArgN int) {
+	switch {
+	case c.UserType == 3:
+		// Operator: only their own calls. call_outcomes.agent_username (set
+		// from a real-time AMI BridgeEnter event — see
+		// ami.recordAgentConnected) is the authoritative answer to "which
+		// single agent actually took this call": a KC queue rings every
+		// available member's channel at once (ringall), and ast_cdr's own
+		// dst/channel/dstchannel — snapshotted from the dial attempt, not
+		// the eventual bridge — can end up reflecting a member who was rung
+		// but never answered, which let that operator see a colleague's
+		// answered call. Trust call_outcomes whenever a row exists for this
+		// call (call_outcomes.linkedid IS NOT NULL); fall back to the old
+		// src/dst/channel heuristic only for calls AMI never tracked a
+		// bridge for — direct extension-to-extension calls, outbound calls
+		// (channel/dstchannel still carries the operator's own PJSIP
+		// endpoint name regardless of any CALLERID override an outbound
+		// tenant caller ID applies to src), or calls predating this tracking.
+		fragment = ` AND (
+			call_outcomes.agent_username = $` + strconv.Itoa(argN) + `
+			OR (
+				call_outcomes.linkedid IS NULL
+				AND (src = $` + strconv.Itoa(argN+1) + ` OR dst = $` + strconv.Itoa(argN+1) +
+			` OR channel LIKE $` + strconv.Itoa(argN+2) + ` OR dstchannel LIKE $` + strconv.Itoa(argN+2) + `)
+			)
+		)`
+		args = []any{c.Username, c.Username, "PJSIP/" + c.Username + "-%"}
+		nextArgN = argN + 3
+	case c.UserType != 0 && c.TenantID != nil:
+		// TenantAdmin / Supervisor: all calls of their tenant (see kc_numbers match below for missed-call coverage)
+		fragment = ` AND (accountcode = $` + strconv.Itoa(argN) + ` OR src IN (
+			SELECT sip_no FROM users WHERE tenant_id = $` + strconv.Itoa(argN) + ` AND sip_no != ''
+		) OR dst IN (
+			SELECT sip_no FROM users WHERE tenant_id = $` + strconv.Itoa(argN) + ` AND sip_no != ''
+		) OR dst IN (
+			SELECT number FROM kc_numbers WHERE tenant_id = $` + strconv.Itoa(argN) + `
+		))`
+		args = []any{strconv.Itoa(*c.TenantID)}
+		nextArgN = argN + 1
+	default:
+		// SuperAdmin (UserType 0): unrestricted, sees everything.
+		nextArgN = argN
+	}
+	return
+}
+
 func (h *CDRHandler) List(w http.ResponseWriter, r *http.Request) {
 	c := mw.GetClaims(r)
 	q := r.URL.Query()
@@ -85,31 +138,11 @@ func (h *CDRHandler) List(w http.ResponseWriter, r *http.Request) {
 	args := []any{}
 	n := 1
 
-	// Operator: only their own calls. Matching src/dst alone misses outbound
-	// calls whose tenant has an outbound_caller_id configured: CreateTenantContext's
-	// _9X. rule does Set(CALLERID(num)=<tenant's outbound id>) on the operator's
-	// own channel before Dial()-ing out, so that CDR row's src ends up being the
-	// tenant's caller ID, not the operator's username, and dst is the external
-	// number — neither matches. channel/dstchannel (e.g. "PJSIP/1001-00000045")
-	// always carries the operator's own PJSIP endpoint name regardless of any
-	// CALLERID override, so match on that too.
-	if c.UserType == 3 {
-		query += ` AND (src = $` + strconv.Itoa(n) + ` OR dst = $` + strconv.Itoa(n) +
-			` OR channel LIKE $` + strconv.Itoa(n+1) + ` OR dstchannel LIKE $` + strconv.Itoa(n+1) + `)`
-		args = append(args, c.Username, "PJSIP/"+c.Username+"-%")
-		n += 2
-	} else if c.UserType != 0 && c.TenantID != nil {
-		// TenantAdmin / Supervisor: all calls of their tenant (see kc_numbers match below for missed-call coverage)
-		query += ` AND (accountcode = $` + strconv.Itoa(n) + ` OR src IN (
-			SELECT sip_no FROM users WHERE tenant_id = $` + strconv.Itoa(n) + ` AND sip_no != ''
-		) OR dst IN (
-			SELECT sip_no FROM users WHERE tenant_id = $` + strconv.Itoa(n) + ` AND sip_no != ''
-		) OR dst IN (
-			SELECT number FROM kc_numbers WHERE tenant_id = $` + strconv.Itoa(n) + `
-		))`
-		args = append(args, strconv.Itoa(*c.TenantID))
-		n++
-	}
+	scopeFrag, scopeArgs, nextN := cdrScopeFilter(c, n)
+	query += scopeFrag
+	args = append(args, scopeArgs...)
+	n = nextN
+
 	if dateFrom != "" {
 		query += ` AND calldate >= $` + strconv.Itoa(n)
 		args = append(args, dateFrom)
@@ -157,16 +190,27 @@ func (h *CDRHandler) List(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *CDRHandler) Get(w http.ResponseWriter, r *http.Request) {
+	c := mw.GetClaims(r)
 	id, _ := strconv.Atoi(chi.URLParam(r, "id"))
+
+	query := `SELECT ast_cdr.id, calldate, clid, src, dst, dcontext, channel, dstchannel,
+	                 duration, billsec, disposition, accountcode, uniqueid, userfield,
+	                 ast_cdr.linkedid, COALESCE(call_outcomes.agent_connected, FALSE)
+	          FROM ast_cdr
+	          LEFT JOIN call_outcomes ON call_outcomes.linkedid = ast_cdr.linkedid
+	          WHERE ast_cdr.id = $1`
+	args := []any{id}
+	// This handler is RequireRole(2)-gated (SuperAdmin/TenantAdmin/Supervisor
+	// only — Operators never reach it), but without this it let a
+	// Supervisor/TenantAdmin from ANY tenant pull ANY other tenant's call
+	// metadata just by guessing the numeric id. Same scoping as List.
+	scopeFrag, scopeArgs, _ := cdrScopeFilter(c, 2)
+	query += scopeFrag
+	args = append(args, scopeArgs...)
+
 	var rec CDRRecord
-	err := h.DB.QueryRowContext(r.Context(),
-		`SELECT ast_cdr.id, calldate, clid, src, dst, dcontext, channel, dstchannel,
-		        duration, billsec, disposition, accountcode, uniqueid, userfield,
-		        ast_cdr.linkedid, COALESCE(call_outcomes.agent_connected, FALSE)
-		 FROM ast_cdr
-		 LEFT JOIN call_outcomes ON call_outcomes.linkedid = ast_cdr.linkedid
-		 WHERE ast_cdr.id = $1`, id,
-	).Scan(&rec.ID, &rec.CallDate, &rec.Clid, &rec.Src, &rec.Dst,
+	err := h.DB.QueryRowContext(r.Context(), query, args...).Scan(
+		&rec.ID, &rec.CallDate, &rec.Clid, &rec.Src, &rec.Dst,
 		&rec.Dcontext, &rec.Channel, &rec.DstChannel,
 		&rec.Duration, &rec.Billsec, &rec.Disposition,
 		&rec.AccountCode, &rec.UniqueID, &rec.UserField,
@@ -188,15 +232,29 @@ func (h *CDRHandler) Get(w http.ResponseWriter, r *http.Request) {
 // MinIO. That keeps MinIO itself fully private (no anonymous bucket access,
 // no address the browser ever needs to reach directly) and means a
 // bookmarked/leaked URL is useless without a valid session, since every
-// request re-checks auth here. http.ServeContent drives it so Range
-// requests (seeking within the recording) work correctly — minio.Object
-// implements io.ReadSeeker, translating each Seek into a ranged GetObject
-// call under the hood.
+// request re-checks auth here — including which specific call this id is
+// allowed to see (cdrScopeFilter), not just that the caller holds a
+// RequireRole(2)-eligible role in general: without that, any
+// Supervisor/TenantAdmin, from any tenant, could listen to any other
+// tenant's recording just by iterating the numeric id. http.ServeContent
+// drives it so Range requests (seeking within the recording) work correctly
+// — minio.Object implements io.ReadSeeker, translating each Seek into a
+// ranged GetObject call under the hood.
 func (h *CDRHandler) Audio(w http.ResponseWriter, r *http.Request) {
+	c := mw.GetClaims(r)
 	id, _ := strconv.Atoi(chi.URLParam(r, "id"))
+
+	query := `SELECT ast_cdr.userfield
+	          FROM ast_cdr
+	          LEFT JOIN call_outcomes ON call_outcomes.linkedid = ast_cdr.linkedid
+	          WHERE ast_cdr.id = $1`
+	args := []any{id}
+	scopeFrag, scopeArgs, _ := cdrScopeFilter(c, 2)
+	query += scopeFrag
+	args = append(args, scopeArgs...)
+
 	var userField string
-	err := h.DB.QueryRowContext(r.Context(),
-		`SELECT userfield FROM ast_cdr WHERE id = $1`, id).Scan(&userField)
+	err := h.DB.QueryRowContext(r.Context(), query, args...).Scan(&userField)
 	if err != nil || userField == "" {
 		writeError(w, http.StatusNotFound, "no recording")
 		return

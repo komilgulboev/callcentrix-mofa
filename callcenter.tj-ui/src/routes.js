@@ -8,7 +8,9 @@ const UnauthorizedUsers = React.lazy(() => import('src/views/users/UnauthorizedU
 const CDR          = React.lazy(() => import('src/views/cdr/CDR'))
 const Tickets      = React.lazy(() => import('src/views/tickets/Tickets'))
 const TicketDetail = React.lazy(() => import('src/views/tickets/TicketDetail'))
+const Tasks        = React.lazy(() => import('src/views/tasks/Tasks'))
 const Topics       = React.lazy(() => import('src/views/topics/Topics'))
+const Sites        = React.lazy(() => import('src/views/sites/Sites'))
 const KnowledgeBase         = React.lazy(() => import('src/views/knowledgebase/KnowledgeBase'))
 const KnowledgeBaseCategory = React.lazy(() => import('src/views/knowledgebase/KnowledgeBaseCategory'))
 const KnowledgeBaseArticle  = React.lazy(() => import('src/views/knowledgebase/KnowledgeBaseArticle'))
@@ -17,6 +19,7 @@ const IVR          = React.lazy(() => import('src/views/ivr/IVR'))
 const Blacklist    = React.lazy(() => import('src/views/blacklist/Blacklist'))
 const Whitelist    = React.lazy(() => import('src/views/whitelist/Whitelist'))
 const TicketsReport = React.lazy(() => import('src/views/reports/TicketsReport'))
+const TasksReport   = React.lazy(() => import('src/views/reports/TasksReport'))
 const Settings     = React.lazy(() => import('src/views/settings/Settings'))
 const Phone = React.lazy(() => import('src/views/phone/Phone.jsx'))
 
@@ -30,7 +33,9 @@ const routes = [
   { path: '/cdr',          name: 'CDR',          element: CDR,         roles: [0, 1, 2] },
   { path: '/tickets',      name: 'Tickets',      element: Tickets },
   { path: '/tickets/:id',  name: 'Ticket',       element: TicketDetail },
+  { path: '/tasks',        name: 'Tasks',        element: Tasks },
   { path: '/topics',       name: 'Topics',       element: Topics,      roles: [0, 1] },
+  { path: '/sites',        name: 'Sites',        element: Sites,       roles: [0, 1] },
   { path: '/knowledge-base',                  name: 'KnowledgeBase',         element: KnowledgeBase },
   { path: '/knowledge-base/new',              name: 'KnowledgeBaseNew',      element: KnowledgeBaseEditor,  roles: [1] },
   { path: '/knowledge-base/category/:id',     name: 'KnowledgeBaseCategory', element: KnowledgeBaseCategory },
@@ -40,6 +45,7 @@ const routes = [
   { path: '/blacklist',    name: 'Blacklist',    element: Blacklist,   roles: [0, 1] },
   { path: '/whitelist',    name: 'Whitelist',    element: Whitelist,   roles: [0, 1] },
   { path: '/reports/tickets', name: 'Tickets Report', element: TicketsReport, roles: [0, 1, 2] },
+  { path: '/reports/tasks',   name: 'Tasks Report',   element: TasksReport,   roles: [0, 1, 2] },
   { path: '/settings',     name: 'Settings',     element: Settings }, // без roles — для всех
 ]
 
