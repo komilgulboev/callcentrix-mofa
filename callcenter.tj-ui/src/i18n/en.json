@@ -147,6 +147,8 @@
     "enter_password": "Enter password",
     "delete_confirm": "Delete this user? Their SIP account will also be removed.",
     "sip_info": "Username = SIP number, e.g. 1001, 1002. Same credentials are used for the web phone.",
+    "email_label": "Email",
+    "email_hint": "Optional — if set, ticket assignment notifications are also sent here.",
     "telegram_chat_id_label": "Telegram Chat ID",
     "telegram_chat_id_hint": "The user's Telegram chat ID — used for task notifications. Getting it via the button below is more reliable than typing it in by hand.",
     "telegram_chat_id_taken": "This Telegram chat is already linked to another user",
@@ -200,8 +202,10 @@
     "col_topic": "Topic",
     "col_site": "Site",
     "col_caller": "Caller",
+    "col_assigned": "Assigned",
     "col_priority": "Priority",
     "col_status": "Status",
+    "col_resolved_by": "Resolved By",
     "col_created": "Created",
     "empty": "No tickets found",
     "subject": "Subject",
@@ -238,7 +242,14 @@
     "site": "Site",
     "priority": "Priority",
     "created": "Created",
-    "updated": "Updated"
+    "updated": "Updated",
+    "history": "History",
+    "no_history": "No history yet.",
+    "event_opened": "opened the ticket",
+    "event_status_changed": "changed status: {{from}} → {{to}}",
+    "event_assigned": "assigned the ticket to: {{names}}",
+    "event_unassigned": "cleared the assignment",
+    "locked_hint": "This ticket is resolved — only a supervisor or admin can edit, assign, or comment on it further."
   },
   "monitor": {
     "title": "Live Monitor",
@@ -318,7 +329,15 @@
     "telegram_title": "Telegram",
     "telegram_bot_token": "Bot token",
     "telegram_bot_token_hint": "Token issued by @BotFather — used to send task notifications.",
-    "telegram_saved": "Telegram settings saved"
+    "telegram_saved": "Telegram settings saved",
+    "smtp_title": "SMTP (email)",
+    "smtp_host": "Host",
+    "smtp_port": "Port",
+    "smtp_username": "Username",
+    "smtp_password": "Password",
+    "smtp_from": "From address",
+    "smtp_from_hint": "Shown as the \"From\" address. If empty, the username is used instead.",
+    "smtp_saved": "SMTP settings saved"
   },
   "topics": {
     "title": "Topic Catalog",
@@ -441,6 +460,8 @@
   },
   "reports": {
     "tickets_title": "Tickets Report",
+    "export_excel": "Export to Excel",
+    "resolved_at": "Resolved At",
     "select_tenant": "— select tenant —",
     "col_caller": "Caller Number",
     "col_handled_by": "Handled By",

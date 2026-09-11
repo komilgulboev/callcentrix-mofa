@@ -147,6 +147,8 @@
     "enter_password": "Парол ворид кунед",
     "delete_confirm": "Корбарро ҳазф кунед? Аккаунти SIP-и он низ ҳазф мешавад.",
     "sip_info": "Логин = рақами SIP, масалан 1001, 1002. Ҳамин маълумот барои веб-телефон истифода мешавад.",
+    "email_label": "Email",
+    "email_hint": "Ихтиёрӣ — агар нишон дода шавад, огоҳинома дар бораи таъин шудани тикет ба он ҳам фиристода мешавад.",
     "telegram_chat_id_label": "Telegram Chat ID",
     "telegram_chat_id_hint": "ID-и чати корбар дар Telegram — барои огоҳиномаҳои вазифаҳо. Гирифтани он тавассути тугмаи поён нисбат ба воридкунии дастӣ боэътимодтар аст.",
     "telegram_chat_id_taken": "Ин чати Telegram аллакай ба корбари дигар пайваст шудааст",
@@ -200,8 +202,10 @@
     "col_topic": "Категория",
     "col_site": "Сомона",
     "col_caller": "Занг занданда",
+    "col_assigned": "Таъин шудааст",
     "col_priority": "Афзалият",
     "col_status": "Ҳолат",
+    "col_resolved_by": "Кӣ ҳал кард",
     "col_created": "Сохташуд",
     "empty": "Хатҳои кор ёфт нашуданд",
     "subject": "Мавзӯъ",
@@ -238,7 +242,14 @@
     "site": "Сомона",
     "priority": "Афзалият",
     "created": "Сохташуд",
-    "updated": "Навсозишуд"
+    "updated": "Навсозишуд",
+    "history": "Таърих",
+    "no_history": "Таърих холӣ аст.",
+    "event_opened": "хати корро кушод",
+    "event_status_changed": "ҳолатро иваз кард: {{from}} → {{to}}",
+    "event_assigned": "хати корро таъин кард ба: {{names}}",
+    "event_unassigned": "таъиноти масъулро бекор кард",
+    "locked_hint": "Хати кор ҳал шудааст — таҳрир, таъиноти масъул ва шарҳдиҳиро танҳо супервайзер ё маъмур анҷом дода метавонад."
   },
   "monitor": {
     "title": "Назорат",
@@ -318,7 +329,15 @@
     "telegram_title": "Telegram",
     "telegram_bot_token": "Токени бот",
     "telegram_bot_token_hint": "Токени аз @BotFather гирифташуда — барои фиристодани огоҳиномаҳои вазифаҳо истифода мешавад.",
-    "telegram_saved": "Танзимоти Telegram сабт шуд"
+    "telegram_saved": "Танзимоти Telegram сабт шуд",
+    "smtp_title": "SMTP (почта)",
+    "smtp_host": "Хост",
+    "smtp_port": "Порт",
+    "smtp_username": "Логин",
+    "smtp_password": "Парол",
+    "smtp_from": "Суроғаи фиристанда",
+    "smtp_from_hint": "Дар майдони «Аз» нишон дода мешавад. Агар холӣ бошад — логин истифода мешавад.",
+    "smtp_saved": "Танзимоти SMTP сабт шуд"
   },
   "topics": {
     "title": "Феҳристи мавзӯъҳо",
@@ -441,6 +460,8 @@
   },
   "reports": {
     "tickets_title": "Ҳисобот аз рӯи муроҷиатҳо",
+    "export_excel": "Содирот ба Excel",
+    "resolved_at": "Санаи ҳал",
     "select_tenant": "— тенантро интихоб кунед —",
     "col_caller": "Рақами зангзананда",
     "col_handled_by": "Кӣ ҷавоб дод",

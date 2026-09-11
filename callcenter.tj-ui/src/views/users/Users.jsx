@@ -13,7 +13,7 @@ import { users as usersApi } from 'src/api'
 import useAuthStore from 'src/store/auth'
 
 const ROLE_COLORS = ['danger', 'primary', 'warning', 'info']
-const EMPTY = { username: '', password: '', userType: '3', sipNo: '', firstName: '', lastName: '', telegramChatId: '' }
+const EMPTY = { username: '', password: '', userType: '3', sipNo: '', firstName: '', lastName: '', telegramChatId: '', email: '' }
 
 export default function Users() {
   const { t } = useTranslation()
@@ -55,6 +55,7 @@ export default function Users() {
       firstName: u.firstName ?? '',
       lastName:  u.lastName ?? '',
       telegramChatId: u.telegramChatId ?? '',
+      email: u.email ?? '',
     })
     setLinkCode(null); setLinkError('')
     setModal(true)
@@ -301,6 +302,13 @@ export default function Users() {
                   <option key={r.value} value={r.value}>{r.label}</option>
                 ))}
               </CFormSelect>
+            </div>
+            <div>
+              <CFormLabel>{t('users.email_label')}</CFormLabel>
+              <CFormInput type="email" value={form.email}
+                onChange={(e) => setForm({ ...form, email: e.target.value })}
+                placeholder="name@example.com" />
+              <div className="form-text">{t('users.email_hint')}</div>
             </div>
             <div>
               <CFormLabel>{t('users.telegram_chat_id_label')}</CFormLabel>

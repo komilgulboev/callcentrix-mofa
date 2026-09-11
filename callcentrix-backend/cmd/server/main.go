@@ -239,6 +239,8 @@ func main() {
 			r.Put("/api/settings/smpp", settingsH.UpdateSMPPSettings)
 			r.Get("/api/settings/telegram", settingsH.GetTelegramSettings)
 			r.Put("/api/settings/telegram", settingsH.UpdateTelegramSettings)
+			r.Get("/api/settings/smtp", settingsH.GetSMTPSettings)
+			r.Put("/api/settings/smtp", settingsH.UpdateSMTPSettings)
 
 			r.Get("/api/users/unauthorized", usersH.ListUnauthorized)
 			r.Post("/api/users/{id}/authorize", usersH.Authorize)
@@ -314,6 +316,7 @@ func main() {
 		r.Delete("/api/tickets/{id}", ticketsH.Delete)
 		r.Patch("/api/tickets/{id}/assign", ticketsH.Assign)
 		r.Get("/api/tickets/{id}/comments", ticketsH.ListComments)
+		r.Get("/api/tickets/{id}/history", ticketsH.ListTicketHistory)
 		r.Post("/api/tickets/{id}/comments", ticketsH.AddComment)
 
 		// Tasks — read/status-change endpoints are all roles, scoped

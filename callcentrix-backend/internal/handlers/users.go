@@ -32,6 +32,7 @@ type User struct {
 	CreatedAt      string  `json:"createdAt"`
 	ServerName     *string `json:"serverName"` // which Asterisk server this agent is assigned to, if any
 	TelegramChatID string  `json:"telegramChatId"`
+	Email          string  `json:"email"`
 }
 
 func (h *UsersHandler) List(w http.ResponseWriter, r *http.Request) {
@@ -41,12 +42,12 @@ func (h *UsersHandler) List(w http.ResponseWriter, r *http.Request) {
 
 	if c.UserType == 0 {
 		rows, err = h.DB.QueryContext(r.Context(),
-			`SELECT u.id, u.tenant_id, u.username, u.first_name, u.last_name, u.user_type, u.role, u.sip_no, u.active, u.created_at, s.name, u.telegram_chat_id
+			`SELECT u.id, u.tenant_id, u.username, u.first_name, u.last_name, u.user_type, u.role, u.sip_no, u.active, u.created_at, s.name, u.telegram_chat_id, u.email
 			 FROM users u LEFT JOIN asterisk_servers s ON s.id = u.server_id
 			 WHERE u.phone_verified = TRUE ORDER BY u.id`)
 	} else {
 		rows, err = h.DB.QueryContext(r.Context(),
-			`SELECT u.id, u.tenant_id, u.username, u.first_name, u.last_name, u.user_type, u.role, u.sip_no, u.active, u.created_at, s.name, u.telegram_chat_id
+			`SELECT u.id, u.tenant_id, u.username, u.first_name, u.last_name, u.user_type, u.role, u.sip_no, u.active, u.created_at, s.name, u.telegram_chat_id, u.email
 			 FROM users u LEFT JOIN asterisk_servers s ON s.id = u.server_id
 			 WHERE u.tenant_id = $1 AND u.phone_verified = TRUE ORDER BY u.id`, c.TenantID)
 	}
@@ -60,7 +61,7 @@ func (h *UsersHandler) List(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var u User
 		if err := rows.Scan(&u.ID, &u.TenantID, &u.Username, &u.FirstName, &u.LastName,
-			&u.UserType, &u.Role, &u.SipNo, &u.Active, &u.CreatedAt, &u.ServerName, &u.TelegramChatID); err != nil {
+			&u.UserType, &u.Role, &u.SipNo, &u.Active, &u.CreatedAt, &u.ServerName, &u.TelegramChatID, &u.Email); err != nil {
 			continue
 		}
 		result = append(result, u)
@@ -72,10 +73,10 @@ func (h *UsersHandler) Get(w http.ResponseWriter, r *http.Request) {
 	id, _ := strconv.Atoi(chi.URLParam(r, "id"))
 	var u User
 	err := h.DB.QueryRowContext(r.Context(),
-		`SELECT id, tenant_id, username, first_name, last_name, user_type, role, sip_no, active, created_at, telegram_chat_id
+		`SELECT id, tenant_id, username, first_name, last_name, user_type, role, sip_no, active, created_at, telegram_chat_id, email
 		 FROM users WHERE id = $1`, id,
 	).Scan(&u.ID, &u.TenantID, &u.Username, &u.FirstName, &u.LastName,
-		&u.UserType, &u.Role, &u.SipNo, &u.Active, &u.CreatedAt, &u.TelegramChatID)
+		&u.UserType, &u.Role, &u.SipNo, &u.Active, &u.CreatedAt, &u.TelegramChatID, &u.Email)
 	if err == sql.ErrNoRows {
 		writeError(w, http.StatusNotFound, "not found")
 		return
@@ -99,6 +100,7 @@ func (h *UsersHandler) Create(w http.ResponseWriter, r *http.Request) {
 		SipNo          string `json:"sipNo"`
 		TenantID       *int   `json:"tenantId"`
 		TelegramChatID string `json:"telegramChatId"`
+		Email          string `json:"email"`
 	}
 	if err := decode(r, &body); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid body")
@@ -133,11 +135,11 @@ func (h *UsersHandler) Create(w http.ResponseWriter, r *http.Request) {
 	var id int
 	err = h.DB.QueryRowContext(r.Context(),
 		`INSERT INTO users
-			(tenant_id, username, password_hash, sip_password, first_name, last_name, user_type, role, sip_no, active, server_id, telegram_chat_id)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,FALSE,$10,$11) RETURNING id`,
+			(tenant_id, username, password_hash, sip_password, first_name, last_name, user_type, role, sip_no, active, server_id, telegram_chat_id, email)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,FALSE,$10,$11,$12) RETURNING id`,
 		body.TenantID, body.Username, string(hash),
 		body.Password,
-		body.FirstName, body.LastName, body.UserType, body.Role, sipNo, serverID, body.TelegramChatID,
+		body.FirstName, body.LastName, body.UserType, body.Role, sipNo, serverID, body.TelegramChatID, body.Email,
 	).Scan(&id)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -169,6 +171,7 @@ func (h *UsersHandler) Update(w http.ResponseWriter, r *http.Request) {
 		Role           int    `json:"role"`
 		SipNo          string `json:"sipNo"`
 		TelegramChatID string `json:"telegramChatId"`
+		Email          string `json:"email"`
 	}
 	if err := decode(r, &body); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid body")
@@ -192,10 +195,10 @@ func (h *UsersHandler) Update(w http.ResponseWriter, r *http.Request) {
 		}
 		_, err = h.DB.ExecContext(r.Context(),
 			`UPDATE users SET username=$1, password_hash=$2, sip_password=$3,
-			 first_name=$4, last_name=$5, user_type=$6, role=$7, sip_no=$8, telegram_chat_id=$9, updated_at=NOW()
-			 WHERE id=$10`,
+			 first_name=$4, last_name=$5, user_type=$6, role=$7, sip_no=$8, telegram_chat_id=$9, email=$10, updated_at=NOW()
+			 WHERE id=$11`,
 			body.Username, string(hash), body.Password,
-			body.FirstName, body.LastName, body.UserType, body.Role, sipNo, body.TelegramChatID, id)
+			body.FirstName, body.LastName, body.UserType, body.Role, sipNo, body.TelegramChatID, body.Email, id)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -207,9 +210,9 @@ func (h *UsersHandler) Update(w http.ResponseWriter, r *http.Request) {
 	} else {
 		_, err := h.DB.ExecContext(r.Context(),
 			`UPDATE users SET username=$1, first_name=$2, last_name=$3,
-			 user_type=$4, role=$5, sip_no=$6, telegram_chat_id=$7, updated_at=NOW() WHERE id=$8`,
+			 user_type=$4, role=$5, sip_no=$6, telegram_chat_id=$7, email=$8, updated_at=NOW() WHERE id=$9`,
 			body.Username, body.FirstName, body.LastName,
-			body.UserType, body.Role, sipNo, body.TelegramChatID, id)
+			body.UserType, body.Role, sipNo, body.TelegramChatID, body.Email, id)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return

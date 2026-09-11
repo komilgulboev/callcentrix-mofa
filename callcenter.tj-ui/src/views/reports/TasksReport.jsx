@@ -1,9 +1,12 @@
 import React, { useEffect, useState } from 'react'
 import {
   CCard, CCardBody, CAlert, CSpinner, CTable, CTableBody, CTableDataCell,
-  CTableHead, CTableHeaderCell, CTableRow, CBadge, CFormInput, CFormSelect, CFormLabel,
+  CTableHead, CTableHeaderCell, CTableRow, CBadge, CButton, CFormInput, CFormSelect, CFormLabel,
 } from '@coreui/react'
+import CIcon from '@coreui/icons-react'
+import { cilCloudDownload } from '@coreui/icons'
 import { useTranslation } from 'react-i18next'
+import * as XLSX from 'xlsx'
 import { reports as reportsApi, tenants as tenantsApi } from 'src/api'
 import useAuthStore from 'src/store/auth'
 
@@ -85,10 +88,30 @@ export default function TasksReport() {
 
   const statusLabel = (s) => (s === 'total' ? t('reports.total_short') : t(`tasks.status_${s}`, { defaultValue: s }))
 
+  const handleExport = () => {
+    const data = rows.map((row) => ({
+      '#': row.id,
+      [t('tasks.task_title_label')]: row.title,
+      [t('tasks.col_status')]: statusLabel(row.status),
+      [t('tasks.created_by')]: row.createdBy || '',
+      [t('tasks.assigned_to')]: row.assignees || '',
+      [t('tickets.col_created')]: new Date(row.createdAt).toLocaleString(),
+      [t('tasks.resolved_by')]: row.resolvedBy || '',
+      [t('reports.resolved_at')]: row.resolvedAt ? new Date(row.resolvedAt).toLocaleString() : '',
+    }))
+    const sheet = XLSX.utils.json_to_sheet(data)
+    const book = XLSX.utils.book_new()
+    XLSX.utils.book_append_sheet(book, sheet, t('reports.tasks_title').slice(0, 31))
+    XLSX.writeFile(book, `${t('reports.tasks_title')} ${dateFrom} - ${dateTo}.xlsx`)
+  }
+
   return (
     <>
       <div className="d-flex align-items-center justify-content-between mb-4">
         <h4 className="mb-0">{t('reports.tasks_title')}</h4>
+        <CButton color="success" variant="outline" size="sm" onClick={handleExport} disabled={loading || !rows.length}>
+          <CIcon icon={cilCloudDownload} className="me-2" />{t('reports.export_excel')}
+        </CButton>
       </div>
 
       {error && <CAlert color="danger" dismissible onClose={() => setError('')}>{error}</CAlert>}

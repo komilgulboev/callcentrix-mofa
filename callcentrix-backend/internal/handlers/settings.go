@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"callcentrix/internal/email"
 )
 
 // SettingsHandler manages the platform-wide branding shown on the login
@@ -209,6 +211,83 @@ func (h *SettingsHandler) UpdateSMPPSettings(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+type smtpSettingsResponse struct {
+	Host        string `json:"host"`
+	Port        int    `json:"port"`
+	Username    string `json:"username"`
+	FromAddr    string `json:"fromAddr"`
+	HasPassword bool   `json:"hasPassword"`
+}
+
+// GetSMTPSettings returns the outbound mail relay config used to email a
+// user when they're assigned a ticket (see
+// TicketsHandler.notifyTicketAssigned). SuperAdmin only — never includes the
+// password, mirroring GetSMPPSettings.
+func (h *SettingsHandler) GetSMTPSettings(w http.ResponseWriter, r *http.Request) {
+	var (
+		host, username, password, fromAddr string
+		port                                int
+	)
+	err := h.DB.QueryRowContext(r.Context(),
+		`SELECT host, port, username, password, from_addr FROM smtp_settings WHERE id=1`,
+	).Scan(&host, &port, &username, &password, &fromAddr)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, smtpSettingsResponse{
+		Host: host, Port: port, Username: username, FromAddr: fromAddr,
+		HasPassword: password != "",
+	})
+}
+
+// UpdateSMTPSettings saves the mail relay config. SuperAdmin only. An empty
+// password leaves the previously saved password untouched (same rule as SMPP).
+func (h *SettingsHandler) UpdateSMTPSettings(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Host     string `json:"host"`
+		Port     int    `json:"port"`
+		Username string `json:"username"`
+		Password string `json:"password"`
+		FromAddr string `json:"fromAddr"`
+	}
+	if err := decode(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid body")
+		return
+	}
+	if body.Port == 0 {
+		body.Port = 587
+	}
+
+	var err error
+	if body.Password == "" {
+		_, err = h.DB.ExecContext(r.Context(),
+			`UPDATE smtp_settings SET host=$1, port=$2, username=$3, from_addr=$4, updated_at=NOW() WHERE id=1`,
+			body.Host, body.Port, body.Username, body.FromAddr)
+	} else {
+		_, err = h.DB.ExecContext(r.Context(),
+			`UPDATE smtp_settings SET host=$1, port=$2, username=$3, password=$4, from_addr=$5, updated_at=NOW() WHERE id=1`,
+			body.Host, body.Port, body.Username, body.Password, body.FromAddr)
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// loadSMTPConfig is the single shared reader for smtp_settings — used by
+// every handler that emails a notification (currently just
+// TicketsHandler.notifyTicketAssigned). A zero-value Config (Host=="") is
+// email.Send's own signal that SMTP isn't configured.
+func loadSMTPConfig(db *sql.DB) email.Config {
+	var cfg email.Config
+	_ = db.QueryRow(`SELECT host, port, username, password, from_addr FROM smtp_settings WHERE id=1`).
+		Scan(&cfg.Host, &cfg.Port, &cfg.Username, &cfg.Password, &cfg.From)
+	return cfg
 }
 
 type telegramSettingsResponse struct {

@@ -206,6 +206,7 @@ function TicketCreateModal({ visible, onClose, callerNo, callerName, calleeNo, o
 // ─── Ticket Edit Modal ────────────────────────────────────────
 function TicketEditModal({ ticketId, visible, onClose, onSaved }) {
   const { t } = useTranslation()
+  const user = useAuthStore(s => s.user)
   const [activeTab, setActiveTab] = useState('edit')
   const [ticket, setTicket]       = useState(null)
   const [comments, setComments]   = useState([])
@@ -243,6 +244,11 @@ function TicketEditModal({ ticketId, visible, onClose, onSaved }) {
     } catch (e) { setError(e.message) }
     finally { setSaving(false) }
   }
+
+  // Mirrors ticketWriteLocked on the backend: once a ticket is resolved or
+  // closed, an operator can still see it but can't touch it any further —
+  // subject/body/status/priority/comments — only a supervisor/admin still can.
+  const locked = ticket && (ticket.status === 'resolved' || ticket.status === 'closed') && user?.userType === 3
 
   const handleAddComment = async () => {
     if (!commentText.trim()) return
@@ -314,17 +320,17 @@ function TicketEditModal({ ticketId, visible, onClose, onSaved }) {
                     )}
                     <CCol xs={12}>
                       <CFormLabel>{t('tickets.subject')} <span className="text-danger">*</span></CFormLabel>
-                      <CFormInput value={form.subject}
+                      <CFormInput value={form.subject} disabled={locked}
                         onChange={(e) => setForm(f => ({ ...f, subject: e.target.value }))} />
                     </CCol>
                     <CCol xs={12}>
                       <CFormLabel>{t('tickets.description')}</CFormLabel>
-                      <CFormTextarea rows={4} value={form.body}
+                      <CFormTextarea rows={4} value={form.body} disabled={locked}
                         onChange={(e) => setForm(f => ({ ...f, body: e.target.value }))} />
                     </CCol>
                     <CCol md={6}>
                       <CFormLabel>{t('common.status')}</CFormLabel>
-                      <CFormSelect value={form.status} onChange={(e) => setForm(f => ({ ...f, status: e.target.value }))}>
+                      <CFormSelect value={form.status} disabled={locked} onChange={(e) => setForm(f => ({ ...f, status: e.target.value }))}>
                         <option value="new">{t('tickets.status_new')}</option>
                         <option value="open">{t('tickets.status_open')}</option>
                         <option value="pending">{t('tickets.status_pending')}</option>
@@ -334,13 +340,18 @@ function TicketEditModal({ ticketId, visible, onClose, onSaved }) {
                     </CCol>
                     <CCol md={6}>
                       <CFormLabel>{t('common.priority')}</CFormLabel>
-                      <CFormSelect value={form.priority} onChange={(e) => setForm(f => ({ ...f, priority: e.target.value }))}>
+                      <CFormSelect value={form.priority} disabled={locked} onChange={(e) => setForm(f => ({ ...f, priority: e.target.value }))}>
                         <option value="low">{t('tickets.priority_low')}</option>
                         <option value="normal">{t('tickets.priority_normal')}</option>
                         <option value="high">{t('tickets.priority_high')}</option>
                         <option value="urgent">{t('tickets.priority_urgent')}</option>
                       </CFormSelect>
                     </CCol>
+                    {locked && (
+                      <CCol xs={12}>
+                        <div className="text-muted small">{t('ticket_detail.locked_hint')}</div>
+                      </CCol>
+                    )}
                   </CRow>
                 </CForm>
               </CTabPane>
@@ -362,26 +373,30 @@ function TicketEditModal({ ticketId, visible, onClose, onSaved }) {
                     ))
                   )}
                 </div>
-                <div className="border-top pt-3">
-                  <CFormLabel>{t('phone.add_comment_label')}</CFormLabel>
-                  <CFormTextarea
-                    rows={3}
-                    placeholder={t('ticket_detail.write_comment')}
-                    value={commentText}
-                    onChange={(e) => setCommentText(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter' && e.ctrlKey) handleAddComment()
-                    }}
-                  />
-                  <div className="d-flex justify-content-between align-items-center mt-2">
-                    <span className="text-muted small">{t('phone.ctrl_enter_hint')}</span>
-                    <CButton color="primary" size="sm" onClick={handleAddComment}
-                      disabled={!commentText.trim() || sendingComment}>
-                      {sendingComment ? <CSpinner size="sm" className="me-1" /> : <CIcon icon={cilCommentSquare} className="me-1" />}
-                      {t('common.send')}
-                    </CButton>
+                {locked ? (
+                  <div className="text-muted small border-top pt-3">{t('ticket_detail.locked_hint')}</div>
+                ) : (
+                  <div className="border-top pt-3">
+                    <CFormLabel>{t('phone.add_comment_label')}</CFormLabel>
+                    <CFormTextarea
+                      rows={3}
+                      placeholder={t('ticket_detail.write_comment')}
+                      value={commentText}
+                      onChange={(e) => setCommentText(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' && e.ctrlKey) handleAddComment()
+                      }}
+                    />
+                    <div className="d-flex justify-content-between align-items-center mt-2">
+                      <span className="text-muted small">{t('phone.ctrl_enter_hint')}</span>
+                      <CButton color="primary" size="sm" onClick={handleAddComment}
+                        disabled={!commentText.trim() || sendingComment}>
+                        {sendingComment ? <CSpinner size="sm" className="me-1" /> : <CIcon icon={cilCommentSquare} className="me-1" />}
+                        {t('common.send')}
+                      </CButton>
+                    </div>
                   </div>
-                </div>
+                )}
               </CTabPane>
             </CTabContent>
           </>
@@ -389,7 +404,7 @@ function TicketEditModal({ ticketId, visible, onClose, onSaved }) {
       </CModalBody>
       <CModalFooter>
         <CButton color="secondary" onClick={onClose}>{t('common.close')}</CButton>
-        {activeTab === 'edit' && (
+        {activeTab === 'edit' && !locked && (
           <CButton color="primary" onClick={handleSave} disabled={saving || loading}>
             {saving ? <CSpinner size="sm" className="me-2" /> : <CIcon icon={cilPencil} className="me-2" />}
             {t('phone.save_changes')}

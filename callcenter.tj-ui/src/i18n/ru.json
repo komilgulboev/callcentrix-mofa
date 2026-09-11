@@ -147,6 +147,8 @@
     "enter_password": "Введите пароль",
     "delete_confirm": "Удалить пользователя? Его SIP-аккаунт также будет удалён.",
     "sip_info": "Логин = SIP-номер, например 1001, 1002. Те же данные используются для веб-телефона.",
+    "email_label": "Email",
+    "email_hint": "Необязательно — если указан, на него также придёт уведомление о назначении тикета.",
     "telegram_chat_id_label": "Telegram Chat ID",
     "telegram_chat_id_hint": "ID чата пользователя в Telegram — для уведомлений о задачах. Надёжнее получить его через кнопку ниже, а не вводить вручную.",
     "telegram_chat_id_taken": "Этот Telegram-чат уже привязан к другому пользователю",
@@ -200,8 +202,10 @@
     "col_topic": "Категория",
     "col_site": "Сайт",
     "col_caller": "Звонящий",
+    "col_assigned": "Назначено",
     "col_priority": "Приоритет",
     "col_status": "Статус",
+    "col_resolved_by": "Кто решил",
     "col_created": "Создан",
     "empty": "Тикеты не найдены",
     "subject": "Тема",
@@ -238,7 +242,14 @@
     "site": "Сайт",
     "priority": "Приоритет",
     "created": "Создан",
-    "updated": "Обновлён"
+    "updated": "Обновлён",
+    "history": "История",
+    "no_history": "История пуста.",
+    "event_opened": "открыл(а) тикет",
+    "event_status_changed": "изменил(а) статус: {{from}} → {{to}}",
+    "event_assigned": "назначил(а) тикет: {{names}}",
+    "event_unassigned": "снял(а) назначение",
+    "locked_hint": "Тикет решён — редактировать, назначать и комментировать может только супервайзер или администратор."
   },
   "monitor": {
     "title": "Монитор",
@@ -318,7 +329,15 @@
     "telegram_title": "Telegram",
     "telegram_bot_token": "Токен бота",
     "telegram_bot_token_hint": "Токен, выданный @BotFather — используется для отправки уведомлений о задачах.",
-    "telegram_saved": "Настройки Telegram сохранены"
+    "telegram_saved": "Настройки Telegram сохранены",
+    "smtp_title": "SMTP (почта)",
+    "smtp_host": "Хост",
+    "smtp_port": "Порт",
+    "smtp_username": "Логин",
+    "smtp_password": "Пароль",
+    "smtp_from": "Адрес отправителя",
+    "smtp_from_hint": "Показывается в поле «От кого». Если пусто — используется логин.",
+    "smtp_saved": "Настройки SMTP сохранены"
   },
   "topics": {
     "title": "Каталог тем",
@@ -441,6 +460,8 @@
   },
   "reports": {
     "tickets_title": "Отчёт по обращениям",
+    "export_excel": "Экспорт в Excel",
+    "resolved_at": "Дата решения",
     "select_tenant": "— выберите тенант —",
     "col_caller": "Номер звонящего",
     "col_handled_by": "Кто ответил",

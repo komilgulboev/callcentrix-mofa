@@ -99,8 +99,10 @@ export default function Tickets() {
     setSaving(true)
     try {
       const payload = { ...form }
-      if (!payload.topicId) delete payload.topicId
-      if (!payload.siteId) delete payload.siteId
+      if (payload.topicId) payload.topicId = Number(payload.topicId)
+      else delete payload.topicId
+      if (payload.siteId) payload.siteId = Number(payload.siteId)
+      else delete payload.siteId
       await ticketsApi.create(payload)
       setModal(false)
       setForm(EMPTY)
@@ -120,6 +122,9 @@ export default function Tickets() {
     if (ticket.siteId && sitesMap[ticket.siteId]) return siteName(sitesMap[ticket.siteId], lang)
     return '—'
   }
+
+  const getAssigneesLabel = (ticket) =>
+    (ticket.assignees || []).map((a) => (a.isPrimary ? `★ ${a.name}` : a.name)).join(', ') || '—'
 
   const statusLabel = (s) => t(`tickets.status_${s}`, { defaultValue: s })
   const priorityLabel = (p) => t(`tickets.priority_${p}`, { defaultValue: p })
@@ -172,8 +177,10 @@ export default function Tickets() {
                   <CTableHeaderCell>{t('tickets.col_topic')}</CTableHeaderCell>
                   <CTableHeaderCell>{t('tickets.col_site')}</CTableHeaderCell>
                   <CTableHeaderCell>{t('tickets.col_caller')}</CTableHeaderCell>
+                  <CTableHeaderCell>{t('tickets.col_assigned')}</CTableHeaderCell>
                   <CTableHeaderCell>{t('tickets.col_priority')}</CTableHeaderCell>
                   <CTableHeaderCell>{t('tickets.col_status')}</CTableHeaderCell>
+                  <CTableHeaderCell>{t('tickets.col_resolved_by')}</CTableHeaderCell>
                   <CTableHeaderCell>{t('tickets.col_created')}</CTableHeaderCell>
                 </CTableRow>
               </CTableHead>
@@ -188,12 +195,14 @@ export default function Tickets() {
                       {ticket.callerNo || '—'}
                       {ticket.callerName && <div className="text-success small">{ticket.callerName}</div>}
                     </CTableDataCell>
+                    <CTableDataCell className="text-muted small">{getAssigneesLabel(ticket)}</CTableDataCell>
                     <CTableDataCell>
                       <CBadge color={PRIORITY_COLOR[ticket.priority] ?? 'secondary'}>{priorityLabel(ticket.priority)}</CBadge>
                     </CTableDataCell>
                     <CTableDataCell>
                       <CBadge color={STATUS_COLOR[ticket.status] ?? 'secondary'}>{statusLabel(ticket.status)}</CBadge>
                     </CTableDataCell>
+                    <CTableDataCell className="text-muted small">{ticket.resolvedByName || '—'}</CTableDataCell>
                     <CTableDataCell className="text-muted small">
                       {new Date(ticket.createdAt).toLocaleDateString()}
                     </CTableDataCell>
@@ -201,7 +210,7 @@ export default function Tickets() {
                 ))}
                 {!rows.length && (
                   <CTableRow>
-                    <CTableDataCell colSpan={8} className="text-center text-muted py-4">{t('tickets.empty')}</CTableDataCell>
+                    <CTableDataCell colSpan={10} className="text-center text-muted py-4">{t('tickets.empty')}</CTableDataCell>
                   </CTableRow>
                 )}
               </CTableBody>

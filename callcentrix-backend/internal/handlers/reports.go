@@ -24,8 +24,8 @@ type ReportsHandler struct {
 }
 
 // TicketReportRow is one line of the tickets report: the ticket itself plus
-// who created/handled it, who it's assigned to, and (best-effort) the call
-// recording it came from.
+// who created/handled it, who it's assigned to, who (if anyone yet) resolved
+// it, and (best-effort) the call recording it came from.
 type TicketReportRow struct {
 	ID         int        `json:"id"`
 	Subject    string     `json:"subject"`
@@ -35,6 +35,7 @@ type TicketReportRow struct {
 	HandledBy  string     `json:"handledBy"`
 	AssignedTo string     `json:"assignedTo"`
 	Status     string     `json:"status"`
+	ResolvedBy string     `json:"resolvedBy"`
 	CreatedAt  string     `json:"createdAt"`
 	// CdrID, if set, is a best-effort match to the ast_cdr row this ticket's
 	// call likely came from (see attachRecordings) — the frontend plays it
@@ -55,12 +56,17 @@ func (h *ReportsHandler) Tickets(w http.ResponseWriter, r *http.Request) {
 
 	query := `SELECT t.id, t.subject, t.topic_id, tc.names, t.caller_no,
 	                 COALESCE(NULLIF(TRIM(CONCAT(cu.first_name,' ',cu.last_name)), ''), cu.username, ''),
-	                 COALESCE(NULLIF(TRIM(CONCAT(au.first_name,' ',au.last_name)), ''), au.username, ''),
-	                 t.status, t.created_at
+	                 COALESCE((
+	                   SELECT string_agg(COALESCE(NULLIF(TRIM(CONCAT(au.first_name,' ',au.last_name)), ''), au.username), ', ' ORDER BY au.first_name)
+	                   FROM ticket_assignees ta JOIN users au ON au.id = ta.user_id WHERE ta.ticket_id = t.id
+	                 ), ''),
+	                 t.status,
+	                 COALESCE(NULLIF(TRIM(CONCAT(ru.first_name,' ',ru.last_name)), ''), ru.username, ''),
+	                 t.created_at
 	          FROM tickets t
 	          LEFT JOIN topic_catalog tc ON tc.id = t.topic_id
 	          LEFT JOIN users cu ON cu.id = t.user_id
-	          LEFT JOIN users au ON au.id = t.assigned_user_id
+	          LEFT JOIN users ru ON ru.id = t.resolved_by
 	          WHERE 1=1`
 	args := []any{}
 	n := 1
@@ -116,7 +122,7 @@ func (h *ReportsHandler) Tickets(w http.ResponseWriter, r *http.Request) {
 		var row TicketReportRow
 		var namesJSON []byte
 		if err := rows.Scan(&row.ID, &row.Subject, &row.TopicID, &namesJSON, &row.CallerNo,
-			&row.HandledBy, &row.AssignedTo, &row.Status, &row.CreatedAt); err != nil {
+			&row.HandledBy, &row.AssignedTo, &row.Status, &row.ResolvedBy, &row.CreatedAt); err != nil {
 			continue
 		}
 		if row.TopicID != nil && namesJSON != nil {

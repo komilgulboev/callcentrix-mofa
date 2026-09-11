@@ -876,22 +876,21 @@ func (h *TasksHandler) notifyStatusChange(taskID, recipientID int, newStatus str
 }
 
 func (h *TasksHandler) loadBotToken() string {
-	var token string
-	_ = h.DB.QueryRow(`SELECT bot_token FROM telegram_settings WHERE id=1`).Scan(&token)
-	return token
+	return loadTelegramBotToken(h.DB)
 }
 
 // ── Telegram bot: interactive status buttons ────────────────────────────
 
-// RunTelegramBot long-polls Telegram for inline-button presses on task
-// notification messages (see notifyAssignee) and applies the requested
-// status change, plus plain "/start <code>" messages for the account-linking
-// flow (see HandleTelegramMessage) — this is the one long-lived getUpdates
-// connection the backend keeps with Telegram, so both kinds of update have
-// to be dispatched from here rather than each running its own poller. Runs
-// for the process's lifetime; call as `go tasksH.RunTelegramBot()`. The
-// update offset is persisted in telegram_settings so a restart doesn't
-// replay already-handled button presses.
+// RunTelegramBot long-polls Telegram for inline-button presses on task and
+// ticket notification messages (see notifyAssignee / notifyTicketAssigned)
+// and applies the requested status change, plus plain "/start <code>"
+// messages for the account-linking flow (see HandleTelegramMessage) — this
+// is the one long-lived getUpdates connection the backend keeps with
+// Telegram, so all three kinds of update have to be dispatched from here
+// rather than each running its own poller. Runs for the process's lifetime;
+// call as `go tasksH.RunTelegramBot()`. The update offset is persisted in
+// telegram_settings so a restart doesn't replay already-handled button
+// presses.
 func (h *TasksHandler) RunTelegramBot() {
 	offset := h.loadBotUpdateOffset()
 	for {
@@ -911,7 +910,11 @@ func (h *TasksHandler) RunTelegramBot() {
 		for _, u := range updates {
 			offset = u.UpdateID + 1
 			if u.CallbackQuery != nil {
-				h.handleTelegramCallback(token, u.CallbackQuery)
+				if strings.HasPrefix(u.CallbackQuery.Data, "ticket_status:") {
+					handleTicketStatusCallback(h.DB, token, u.CallbackQuery)
+				} else {
+					h.handleTelegramCallback(token, u.CallbackQuery)
+				}
 			}
 			if u.Message != nil {
 				HandleTelegramMessage(h.DB, token, u.Message)

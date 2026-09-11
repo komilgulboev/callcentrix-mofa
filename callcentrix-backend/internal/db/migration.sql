@@ -58,6 +58,38 @@ CREATE TABLE IF NOT EXISTS ticket_comments (
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
+-- Who opened a ticket and every status change since — see
+-- TicketsHandler.Create (initial row, old_status='') and Update (one row per
+-- actual status change). Distinct from ticket_comments: this is a system-
+-- generated audit trail, not something a user writes themselves.
+CREATE TABLE IF NOT EXISTS ticket_status_history (
+    id         SERIAL PRIMARY KEY,
+    ticket_id  INT NOT NULL REFERENCES tickets(id) ON DELETE CASCADE,
+    user_id    INT REFERENCES users(id) ON DELETE SET NULL,
+    username   VARCHAR(100) DEFAULT '',
+    old_status VARCHAR(20) DEFAULT '',
+    new_status VARCHAR(20) NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_ticket_status_history_ticket ON ticket_status_history(ticket_id);
+
+-- Who (re)assigned a ticket and to whom — see TicketsHandler.Assign, the
+-- only writer. `assignees` is a denormalized, comma-joined snapshot of
+-- display names at the time (same convention as ticket_status_history's
+-- username / ticket_comments' username: a historical record that shouldn't
+-- change retroactively if someone is later renamed or removed), empty
+-- string meaning the ticket was unassigned. ListTicketHistory folds this in
+-- with ticket_status_history, sorted together into one timeline.
+CREATE TABLE IF NOT EXISTS ticket_assignment_history (
+    id         SERIAL PRIMARY KEY,
+    ticket_id  INT NOT NULL REFERENCES tickets(id) ON DELETE CASCADE,
+    actor_id   INT REFERENCES users(id) ON DELETE SET NULL,
+    actor_name VARCHAR(100) DEFAULT '',
+    assignees  TEXT DEFAULT '',
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_ticket_assignment_history_ticket ON ticket_assignment_history(ticket_id);
+
 -- ─── Topic Catalog ────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS topic_catalog (
     id         SERIAL PRIMARY KEY,
@@ -83,12 +115,61 @@ CREATE TABLE IF NOT EXISTS site_catalog (
 CREATE INDEX IF NOT EXISTS idx_site_tenant ON site_catalog(tenant_id);
 
 ALTER TABLE tickets ADD COLUMN IF NOT EXISTS topic_id INT REFERENCES topic_catalog(id) ON DELETE SET NULL;
--- The specialist (TenantAdmin/Supervisor) an operator has assigned this
--- ticket to — distinct from user_id, which is whoever created/handled it.
+-- The specialist(s) (TenantAdmin/Supervisor/Operator) assigned this ticket —
+-- distinct from user_id, which is whoever created/handled it. Superseded by
+-- ticket_assignees below (many-to-many); kept only so the one-time backfill
+-- there has something to migrate from.
 ALTER TABLE tickets ADD COLUMN IF NOT EXISTS assigned_user_id INT REFERENCES users(id) ON DELETE SET NULL;
 -- Which site_catalog entry (see above) this ticket is about — optional,
 -- independent of topic_id.
 ALTER TABLE tickets ADD COLUMN IF NOT EXISTS site_id INT REFERENCES site_catalog(id) ON DELETE SET NULL;
+
+-- Who actually moved a ticket to "resolved", and when — set by
+-- TicketsHandler.applyTicketStatusChange, the one place both write paths
+-- (the HTTP Update endpoint and the Telegram status buttons — see
+-- handleTicketStatusCallback) go through. Preserved through a later move to
+-- "closed" (closing is the normal next step after resolving, not a
+-- reopening), but cleared if the ticket is reopened to any earlier status —
+-- at that point "who resolved it" no longer answers anything true, and it
+-- needs to be resolved again by someone. Powers the "who resolved this
+-- ticket" column on the tickets list (see TicketsHandler.List/Get).
+ALTER TABLE tickets ADD COLUMN IF NOT EXISTS resolved_by INT REFERENCES users(id) ON DELETE SET NULL;
+ALTER TABLE tickets ADD COLUMN IF NOT EXISTS resolved_at TIMESTAMPTZ;
+
+-- Many-to-many: a ticket can be assigned to several specialists, one
+-- optionally marked primary — mirrors task_assignees (see
+-- internal/handlers/tasks.go's canChangeStatus comment for the primary-
+-- assignee rationale; tickets don't currently gate anything on it, but the
+-- shape stays consistent with Tasks so both use the same assigneeRef code).
+CREATE TABLE IF NOT EXISTS ticket_assignees (
+    ticket_id  INT NOT NULL REFERENCES tickets(id) ON DELETE CASCADE,
+    user_id    INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    is_primary BOOLEAN NOT NULL DEFAULT FALSE,
+    PRIMARY KEY (ticket_id, user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_ticket_assignees_user ON ticket_assignees(user_id);
+-- At most one primary per ticket.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ticket_assignees_one_primary ON ticket_assignees(ticket_id) WHERE is_primary;
+
+-- One-time backfill: migrate the old single-assignee column into the new
+-- many-assignees model (as that ticket's primary) before dropping it — same
+-- reasoning and same information_schema guard as the tasks backfill below
+-- (the backfill SELECT references the column by name, so it must be skipped
+-- entirely once the column is already gone, not just IF-EXISTS'd).
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'tickets' AND column_name = 'assigned_user_id'
+    ) THEN
+        INSERT INTO ticket_assignees (ticket_id, user_id, is_primary)
+        SELECT id, assigned_user_id, TRUE FROM tickets
+        WHERE assigned_user_id IS NOT NULL
+        ON CONFLICT (ticket_id, user_id) DO NOTHING;
+
+        ALTER TABLE tickets DROP COLUMN assigned_user_id;
+    END IF;
+END $$;
 
 -- ─── Tasks (Dashboard Kanban) ─────────────────────────────────────────────────
 -- Internal work-item tracking, distinct from Tickets (customer-issue
@@ -508,6 +589,26 @@ CREATE TABLE IF NOT EXISTS telegram_link_codes (
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
+-- Single-row outbound SMTP config (same pattern as smpp_settings) — used to
+-- email a user when a ticket is assigned to them (see
+-- TicketsHandler.notifyTicketAssigned), in addition to Telegram.
+CREATE TABLE IF NOT EXISTS smtp_settings (
+    id         INT PRIMARY KEY DEFAULT 1,
+    host       VARCHAR(255) NOT NULL DEFAULT '',
+    port       INT NOT NULL DEFAULT 587,
+    username   VARCHAR(255) NOT NULL DEFAULT '',
+    password   VARCHAR(255) NOT NULL DEFAULT '',
+    from_addr  VARCHAR(255) NOT NULL DEFAULT '',  -- envelope/"From" address; falls back to username if blank
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    CONSTRAINT smtp_settings_single_row CHECK (id = 1)
+);
+INSERT INTO smtp_settings (id) VALUES (1) ON CONFLICT (id) DO NOTHING;
+
+-- Optional — set on the user's create/edit form. Only used to also email a
+-- user when they're assigned a ticket (see TicketsHandler.notifyTicketAssigned);
+-- everything else (login, notifications) is by username/Telegram, not email.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS email VARCHAR(255) DEFAULT '';
+
 -- ─── Asterisk Servers (multi-box telephony, single shared DB) ───────────────
 -- One row per physical Asterisk box. Users are assigned to a server
 -- (least-loaded, see asterisk.PickLeastLoadedServer) so their softphone WS
@@ -598,7 +699,6 @@ CREATE INDEX IF NOT EXISTS idx_users_tenant      ON users(tenant_id);
 CREATE INDEX IF NOT EXISTS idx_users_server      ON users(server_id);
 CREATE INDEX IF NOT EXISTS idx_topic_tenant      ON topic_catalog(tenant_id);
 CREATE INDEX IF NOT EXISTS idx_tickets_topic     ON tickets(topic_id);
-CREATE INDEX IF NOT EXISTS idx_tickets_assigned  ON tickets(assigned_user_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_tenant      ON tasks(tenant_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_creator     ON tasks(created_by);
 CREATE INDEX IF NOT EXISTS idx_tasks_status      ON tasks(status);

@@ -4,8 +4,9 @@ import {
   CTableHead, CTableHeaderCell, CTableRow, CBadge, CButton, CFormInput, CFormSelect, CFormLabel,
 } from '@coreui/react'
 import CIcon from '@coreui/icons-react'
-import { cilMediaPlay } from '@coreui/icons'
+import { cilMediaPlay, cilCloudDownload } from '@coreui/icons'
 import { useTranslation } from 'react-i18next'
+import * as XLSX from 'xlsx'
 import { reports as reportsApi, topics as topicsApi, tenants as tenantsApi, cdr as cdrApi } from 'src/api'
 import { topicName } from 'src/views/topics/Topics'
 import useAuthStore from 'src/store/auth'
@@ -44,6 +45,7 @@ function TicketsTable({ rows, showTopic, getTopicLabel, statusLabel, t }) {
           <CTableHeaderCell>{t('reports.col_handled_by')}</CTableHeaderCell>
           <CTableHeaderCell>{t('reports.col_assigned_to')}</CTableHeaderCell>
           <CTableHeaderCell>{t('tickets.col_status')}</CTableHeaderCell>
+          <CTableHeaderCell>{t('tickets.col_resolved_by')}</CTableHeaderCell>
           <CTableHeaderCell>{t('tickets.col_created')}</CTableHeaderCell>
           <CTableHeaderCell>{t('reports.col_recording')}</CTableHeaderCell>
         </CTableRow>
@@ -60,6 +62,7 @@ function TicketsTable({ rows, showTopic, getTopicLabel, statusLabel, t }) {
             <CTableDataCell>
               <CBadge color={STATUS_COLOR[row.status] ?? 'secondary'}>{statusLabel(row.status)}</CBadge>
             </CTableDataCell>
+            <CTableDataCell className="text-muted small">{row.resolvedBy || '—'}</CTableDataCell>
             <CTableDataCell className="text-muted small">{new Date(row.createdAt).toLocaleString()}</CTableDataCell>
             <CTableDataCell>
               {row.cdrId ? (
@@ -72,7 +75,7 @@ function TicketsTable({ rows, showTopic, getTopicLabel, statusLabel, t }) {
         ))}
         {!rows.length && (
           <CTableRow>
-            <CTableDataCell colSpan={showTopic ? 9 : 8} className="text-center text-muted py-4">
+            <CTableDataCell colSpan={showTopic ? 10 : 9} className="text-center text-muted py-4">
               {t('reports.empty')}
             </CTableDataCell>
           </CTableRow>
@@ -142,10 +145,33 @@ export default function TicketsReport() {
 
   const groups = view === 'group' ? groupByTopic(rows, t('reports.no_topic'), lang) : null
 
+  // Exports the currently filtered rows regardless of view mode (list or
+  // grouped) — one flat sheet, same columns as the "Список" table.
+  const handleExport = () => {
+    const data = rows.map((row) => ({
+      '#': row.id,
+      [t('tickets.col_subject')]: row.subject,
+      [t('tickets.col_topic')]: getTopicLabel(row),
+      [t('reports.col_caller')]: row.callerNo || '',
+      [t('reports.col_handled_by')]: row.handledBy || '',
+      [t('reports.col_assigned_to')]: row.assignedTo || '',
+      [t('tickets.col_status')]: statusLabel(row.status),
+      [t('tickets.col_resolved_by')]: row.resolvedBy || '',
+      [t('tickets.col_created')]: new Date(row.createdAt).toLocaleString(),
+    }))
+    const sheet = XLSX.utils.json_to_sheet(data)
+    const book = XLSX.utils.book_new()
+    XLSX.utils.book_append_sheet(book, sheet, t('reports.tickets_title').slice(0, 31))
+    XLSX.writeFile(book, `${t('reports.tickets_title')} ${dateFrom} - ${dateTo}.xlsx`)
+  }
+
   return (
     <>
       <div className="d-flex align-items-center justify-content-between mb-4">
         <h4 className="mb-0">{t('reports.tickets_title')}</h4>
+        <CButton color="success" variant="outline" size="sm" onClick={handleExport} disabled={loading || !rows.length}>
+          <CIcon icon={cilCloudDownload} className="me-2" />{t('reports.export_excel')}
+        </CButton>
       </div>
 
       {error && <CAlert color="danger" dismissible onClose={() => setError('')}>{error}</CAlert>}

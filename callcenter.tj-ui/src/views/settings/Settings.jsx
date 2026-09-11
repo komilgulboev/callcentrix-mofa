@@ -49,6 +49,7 @@ export default function Settings() {
         {isSuperAdmin && <BrandingCard t={t} />}
         {isSuperAdmin && <SmppCard t={t} />}
         {isSuperAdmin && <TelegramCard t={t} />}
+        {isSuperAdmin && <SmtpCard t={t} />}
 
         <CCard style={{ maxWidth: 480 }}>
           <CCardHeader>{t('settings.change_password')}</CCardHeader>
@@ -258,6 +259,90 @@ function SmppCard({ t }) {
             <div>
               <CFormLabel>{t('settings.smpp_sender_id')}</CFormLabel>
               <CFormInput value={senderId} onChange={(e) => setSenderId(e.target.value)} placeholder="CallCentrix" />
+            </div>
+            <CButton type="submit" color="primary" disabled={saving}>
+              {saving ? <CSpinner size="sm" /> : t('common.save')}
+            </CButton>
+          </CForm>
+        )}
+      </CCardBody>
+    </CCard>
+  )
+}
+
+function SmtpCard({ t }) {
+  const [host,     setHost]     = useState('')
+  const [port,     setPort]     = useState(587)
+  const [username, setUsername] = useState('')
+  const [password, setPassword] = useState('')
+  const [fromAddr, setFromAddr] = useState('')
+  const [hasPassword, setHasPassword] = useState(false)
+  const [loading, setLoading] = useState(true)
+  const [saving,  setSaving]  = useState(false)
+  const [error,   setError]   = useState('')
+  const [success, setSuccess] = useState('')
+
+  useEffect(() => {
+    settingsApi.smtp()
+      .then((s) => {
+        setHost(s.host || '')
+        setPort(s.port || 587)
+        setUsername(s.username || '')
+        setFromAddr(s.fromAddr || '')
+        setHasPassword(!!s.hasPassword)
+      })
+      .catch((e) => setError(e.message))
+      .finally(() => setLoading(false))
+  }, [])
+
+  const handleSave = async (e) => {
+    e.preventDefault()
+    setSaving(true); setError(''); setSuccess('')
+    try {
+      await settingsApi.updateSmtp({ host, port: Number(port), username, password, fromAddr })
+      setPassword('')
+      setHasPassword(hasPassword || password !== '')
+      setSuccess(t('settings.smtp_saved'))
+    } catch (e) { setError(e.message) }
+    finally { setSaving(false) }
+  }
+
+  return (
+    <CCard style={{ maxWidth: 480 }}>
+      <CCardHeader>{t('settings.smtp_title')}</CCardHeader>
+      <CCardBody>
+        {error   && <CAlert color="danger"  dismissible onClose={() => setError('')}>{error}</CAlert>}
+        {success && <CAlert color="success" dismissible onClose={() => setSuccess('')}>{success}</CAlert>}
+
+        {loading ? <CSpinner size="sm" /> : (
+          <CForm onSubmit={handleSave} className="d-flex flex-column gap-3">
+            <div className="row g-2">
+              <div className="col-8">
+                <CFormLabel>{t('settings.smtp_host')}</CFormLabel>
+                <CFormInput value={host} onChange={(e) => setHost(e.target.value)} placeholder="smtp.example.com" required />
+              </div>
+              <div className="col-4">
+                <CFormLabel>{t('settings.smtp_port')}</CFormLabel>
+                <CFormInput type="number" value={port} onChange={(e) => setPort(e.target.value)} required />
+              </div>
+            </div>
+            <div>
+              <CFormLabel>{t('settings.smtp_username')}</CFormLabel>
+              <CFormInput value={username} onChange={(e) => setUsername(e.target.value)} />
+            </div>
+            <div>
+              <CFormLabel>{t('settings.smtp_password')}</CFormLabel>
+              <CFormInput
+                type="password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder={hasPassword ? '••••••' : ''}
+              />
+            </div>
+            <div>
+              <CFormLabel>{t('settings.smtp_from')}</CFormLabel>
+              <CFormInput value={fromAddr} onChange={(e) => setFromAddr(e.target.value)} placeholder="noreply@example.com" />
+              <div className="form-text">{t('settings.smtp_from_hint')}</div>
             </div>
             <CButton type="submit" color="primary" disabled={saving}>
               {saving ? <CSpinner size="sm" /> : t('common.save')}

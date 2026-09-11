@@ -18,6 +18,15 @@ import (
 
 const telegramLinkCodeTTL = 15 * time.Minute
 
+// loadTelegramBotToken is the single shared reader for telegram_settings'
+// bot token — used by every handler that sends a Telegram notification
+// (TasksHandler, TicketsHandler, RunTelegramBot's poll loop).
+func loadTelegramBotToken(db *sql.DB) string {
+	var token string
+	_ = db.QueryRow(`SELECT bot_token FROM telegram_settings WHERE id=1`).Scan(&token)
+	return token
+}
+
 // checkTelegramChatIDAvailable rejects assigning a chat id to a user when
 // it's already saved against a different one. Before this, an admin typing a
 // numeric chat id straight into the user's create/edit form (see Users.jsx)

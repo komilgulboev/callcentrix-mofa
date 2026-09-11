@@ -89,7 +89,8 @@ export const tickets = {
   remove:  (id)        => del(`/api/tickets/${id}`),
   comment: (id, text)  => post(`/api/tickets/${id}/comments`, { text }),
   comments:(id)        => get(`/api/tickets/${id}/comments`),
-  assign:  (id, userId) => patch(`/api/tickets/${id}/assign`, { userId }),
+  history: (id)        => get(`/api/tickets/${id}/history`),
+  assign:  (id, assigneeIds, primaryUserId) => patch(`/api/tickets/${id}/assign`, { assigneeIds, primaryUserId }),
   assignableUsers: ()   => get('/api/tickets/assignable-users'),
 }
 
@@ -318,6 +319,8 @@ export const settings = {
   updateSmpp: (data) => put('/api/settings/smpp', data),
   telegram:       ()     => get('/api/settings/telegram'),
   updateTelegram: (data) => put('/api/settings/telegram', data),
+  smtp:       ()     => get('/api/settings/smtp'),
+  updateSmtp: (data) => put('/api/settings/smtp', data),
 }
 
 // ─── Helpers ─────────────────────────────────────────────────
